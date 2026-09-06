@@ -1,0 +1,28 @@
+# Python virtualenv & caches
+venv-speech/
+__pycache__/
+*.pyc
+
+# Local models (big, self-provisioned) & personal voice recordings
+models/
+voices/我的声音/
+
+# Local runtime config (contains machine-specific model paths)
+bridge/bridge-config.json
+
+# Internal session docs & personal one-off scripts (not for publication)
+docs/HANDOFF.md
+docs/DEPLOYED.md
+scripts/cdp_probe.mjs
+scripts/decode_ref_audio.py
+scripts/setup_models.py
+
+# Audio & log artifacts
+*.wav
+*.mp3
+*.log
+
+# OS noise
+Thumbs.db
+.DS_Store
+Desktop.ini

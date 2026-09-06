@@ -1,0 +1,4 @@
+# Normalize line endings for cross-platform contributors
+* text=auto
+*.cmd text eol=crlf
+*.bat text eol=crlf

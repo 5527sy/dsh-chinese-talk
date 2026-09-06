@@ -1,0 +1,198 @@
+/* 侧边栏语音通话面板。
+   颜色尽量用 DSH 语义变量并带降级值；不依赖宿主额外样式表。 */
+
+.root {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  width: 264px;
+  gap: 10px;
+  padding: 14px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.08));
+  border-radius: 14px;
+  background: var(--dsw-specific-sidebar-fill, rgba(18, 20, 26, 0.92));
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 收起后的悬浮小按钮 */
+.rail {
+  position: fixed;
+  right: 12px;
+  top: 50%;
+  z-index: 80;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.1));
+  border-radius: 50%;
+  background: var(--dsw-specific-sidebar-fill, rgba(18, 20, 26, 0.92));
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.collapse {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #9aa0ae);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.collapse:hover {
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 24px;
+}
+.title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+}
+.subtitle {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #7b8291);
+}
+
+.micArea {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+}
+.micBtn {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  border: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.14));
+  background: var(--dsw-alias-bg-fill-2, rgba(255, 255, 255, 0.06));
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+  font-size: 34px;
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.2s ease;
+}
+.micBtn:hover {
+  transform: scale(1.04);
+}
+.micOn {
+  box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.35), 0 0 24px rgba(244, 63, 94, 0.35);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.micBusy {
+  box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.4);
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.35), 0 0 14px rgba(244, 63, 94, 0.3); }
+  50% { box-shadow: 0 0 0 5px rgba(244, 63, 94, 0.22), 0 0 30px rgba(244, 63, 94, 0.45); }
+}
+
+.stateText {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #c3c7d1);
+  text-align: center;
+}
+.lastText {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #9aa0ae);
+  direction: rtl; /* 长文本从末尾收起 */
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+}
+.toggle {
+  flex: 1;
+  padding: 6px 4px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.1));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #c3c7d1);
+  font-size: 12px;
+  cursor: pointer;
+}
+.toggle:hover {
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+}
+.toggleOn {
+  border-color: rgba(52, 211, 153, 0.55);
+  color: #34d399;
+}
+
+.voiceRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #c3c7d1);
+}
+.voiceRow > span {
+  flex: none;
+}
+.select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.14));
+  background: var(--dsw-alias-bg-fill-2, rgba(255, 255, 255, 0.06));
+  color: var(--dsw-alias-label-primary, #e6e8ee);
+  font-size: 12px;
+  outline: none;
+}
+
+.footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border, rgba(255, 255, 255, 0.08));
+}
+.statusLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary, #9aa0ae);
+}
+.statusLine.ok {
+  color: #34d399;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.meta {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #7b8291);
+}
+.sep {
+  margin: 0 4px;
+  opacity: 0.5;
+}

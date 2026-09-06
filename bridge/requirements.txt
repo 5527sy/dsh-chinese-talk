@@ -1,0 +1,12 @@
+# 语音桥运行依赖。
+# speech-to-speech（HuggingFace, Apache-2.0）自带 torch/torchaudio/transformers/numpy，
+# 并提供 Qwen3TTSHandler（Qwen3-TTS 参考音频克隆）与 VADIterator。
+#   pip install -r requirements.txt
+# 国内加速：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+speech-to-speech==0.2.10
+fastapi
+uvicorn
+soundfile
+scipy
+funasr
+modelscope

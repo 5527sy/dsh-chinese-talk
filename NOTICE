@@ -1,0 +1,21 @@
+dsh-voice-call
+Copyright (c) 2026 dsh-voice-call authors
+
+This project is a derivative of:
+
+  dsh-voice-ai-girlfriend
+  https://github.com/beiyege-01/dsh-voice-ai-girlfriend
+  Copyright (c) beiyege-01
+  Licensed under the Apache License, Version 2.0
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Portions are based on HuggingFace speech-to-speech (Apache-2.0) and
+deepseek-harness (MIT). The bridge/plugin sources under `bridge/` and
+`dsh-plugin/` include code adapted from the project above.
+
+Third-party model usage:
+  - FunASR Paraformer (ModelScope / FunASR, MIT)
+  - Qwen3-TTS-12Hz-1.7B-Base (Apache-2.0)
+  - silero-vad (MIT)
+
+SPDX-License-Identifier: Apache-2.0
