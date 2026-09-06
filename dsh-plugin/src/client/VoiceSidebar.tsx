@@ -1,15 +1,16 @@
 /**
- * VoicePanel V1 — DSH 右侧栏录音面板（conversation.input.dock 槽位）。
+ * VoicePanel — DSH 右侧录音面板（conversation.input.dock 槽位挂载，实际悬浮于窗口最右侧）。
  *
- * 交互：点击 🎙️ 开始录音（MediaRecorder，webm/opus）→ 再次点击停止，
- * 把整段音频上传到本机 record-sink（默认 http://127.0.0.1:8766，可用
- * localStorage `s2s.record.base` 覆盖），由它用 ffmpeg 转成 MP3，
- * 以结束那一秒的年月日时分秒命名存到 D:\dsh_workspeace\vocal\master。
+ * 布局：固定贴窗口右缘、竖排；右上角常驻小图标做「展开 / 隐藏」。
+ * V1：点 🎙️ 开始录音（MediaRecorder，webm/opus）→ 再点结束，上传 record-sink(:8766)
+ *     存 MP3（结束时刻命名）。
+ * V2：时长 <1s 弹出「哎呀，录音太短了」，不保存。
+ * V2.1：保存后自动调 /api/stt 中文识别，文本通过 appendDraft 追加进输入框草稿
+ *      （不自动发送；多条自动接着排）。
  *
- * 后续版本将对最新一条录音做识别 —— 文件名即时间，天然有序。
  * 面板内置活动日志（最近 20 条），没有控制台也能看到每一步结果。
  */
-import { memo, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { VoiceInjected } from './contract.ts'
 import { PttRecorder } from './voice/ptt-recorder.ts'
 import styles from './VoiceSidebar.module.css'
@@ -17,8 +18,8 @@ import styles from './VoiceSidebar.module.css'
 const RECORD_SINK_KEY = 's2s.record.base'
 const DEFAULT_SINK = 'http://127.0.0.1:8766'
 const PANEL_KEY = 's2s.record.panel'
-/** 录音时长小于该值视为误触，丢弃。 */
-const MIN_MS = 300
+/** 录音时长小于 1 秒视为无效，弹出提示并不保存。 */
+const MIN_MS = 1000
 
 function sinkBase(): string {
   try {
@@ -32,7 +33,21 @@ function clock(): string {
   return new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-type Phase = 'idle' | 'recording' | 'saving' | 'error'
+function readHidden(): boolean {
+  try {
+    return localStorage.getItem(PANEL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeHidden(hidden: boolean): void {
+  try {
+    localStorage.setItem(PANEL_KEY, hidden ? '1' : '0')
+  } catch { /* ignore */ }
+}
+
+type Phase = 'idle' | 'recording' | 'saving' | 'recognizing' | 'error'
 
 interface LogLine {
   t: string
@@ -43,39 +58,93 @@ interface LogLine {
 export type VoiceSidebarProps = VoiceInjected
 
 /**
- * @param _props - V1 无注入 face，保留参数以匹配槽位渲染契约。
+ * @param props - 会话注入 face：appendDraft 把识别文本追加进输入框。
  */
-export const VoiceSidebar = memo(function VoiceSidebar(_props: VoiceInjected) {
+export const VoiceSidebar = memo(function VoiceSidebar(props: VoiceInjected) {
   const [phase, setPhase] = useState<Phase>('idle')
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(PANEL_KEY) === '1'
-    } catch {
-      return false
-    }
-  })
+  const [hidden, setHidden] = useState<boolean>(() => readHidden())
   const [log, setLog] = useState<LogLine[]>(() => [
-    { t: clock(), msg: '就绪：点 🎙️ 开始录音，再点一次结束并保存 MP3' },
+    { t: clock(), msg: '就绪：点 🎙️ 录音，结束自动识别并追加到输入框' },
   ])
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const recorderRef = useRef<PttRecorder | null>(null)
-  const savingRef = useRef(false)
+  const busyRef = useRef(false)
 
   const pushLog = (msg: string, bad = false): void => {
     setLog(prev => [...prev.slice(-19), { t: clock(), msg, bad }])
   }
 
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
+
+  const showToast = (msg: string, durationMs = 2600): void => {
+    setToast(msg)
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), durationMs)
+  }
+
+  /** 识别音频并追加进输入框（失败只记日志，不影响已保存的录音）。 */
+  const transcribeAndAppend = async (blob: Blob, ms: number): Promise<void> => {
+    const base = sinkBase()
+    try {
+      setPhase('recognizing')
+      pushLog('识别中…（首次加载模型需 10~60s，之后很快）')
+      const res = await fetch(`${base}/api/stt`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': blob.type || 'audio/webm',
+          'X-Record-Ms': String(ms),
+        },
+        body: blob,
+      })
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean
+        text?: string
+        error?: string
+      } | null
+      if (!res.ok || data === null || data.ok !== true) {
+        pushLog(`识别失败：${data?.error ?? `HTTP ${res.status}`}`, true)
+        return
+      }
+      const text = (data.text ?? '').trim()
+      if (text === '') {
+        pushLog('识别完成，未识别到文字')
+        return
+      }
+      const snippet = text.length > 18 ? `${text.slice(0, 18)}…` : text
+      if (typeof props.appendDraft === 'function') {
+        const err = props.appendDraft(text)
+        if (err === null || err === undefined) {
+          pushLog(`识别 ${text.length} 字：「${snippet}」→ 已追加到输入框`)
+        } else {
+          pushLog(`识别 ${text.length} 字，但填入输入框失败：${err}`, true)
+        }
+      } else {
+        pushLog(`识别 ${text.length} 字：「${snippet}」（输入框未注入，未填入）`, true)
+      }
+    } catch (err) {
+      pushLog(`识别失败：${err instanceof Error ? err.message : String(err)}`, true)
+    }
+  }
+
   const saveRecording = async (blob: Blob, ms: number): Promise<void> => {
-    if (savingRef.current) return
+    if (busyRef.current) return
     if (ms < MIN_MS) {
-      pushLog(`录音太短（${ms}ms），已丢弃`)
+      pushLog(`录音太短（${ms}ms），未保存`)
+      showToast('哎呀，录音太短了')
       setPhase('idle')
       return
     }
-    savingRef.current = true
+    busyRef.current = true
     setPhase('saving')
     try {
-      const res = await fetch(`${sinkBase()}/api/record`, {
+      const base = sinkBase()
+      const res = await fetch(`${base}/api/record`, {
         method: 'POST',
         headers: {
           'Content-Type': blob.type || 'audio/webm',
@@ -96,20 +165,21 @@ export const VoiceSidebar = memo(function VoiceSidebar(_props: VoiceInjected) {
       const seconds = typeof data.seconds === 'number' ? data.seconds.toFixed(1) : '?'
       const kb = typeof data.bytes === 'number' ? Math.round(data.bytes / 1024) : '?'
       pushLog(`已保存 → ${data.file}（${seconds}s / ${kb}KB）`)
+      await transcribeAndAppend(blob, ms)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       pushLog(`保存失败：${msg}`, true)
       setPhase('error')
     } finally {
-      savingRef.current = false
+      busyRef.current = false
       setPhase('idle')
     }
   }
 
   const startRecording = async (): Promise<void> => {
-    if (phase === 'recording' || phase === 'saving') return
+    if (phase === 'recording' || phase === 'saving' || phase === 'recognizing') return
     setPhase('recording')
-    pushLog('开始录音…（再点一次结束并保存）')
+    pushLog('开始录音…（再点一次结束）')
     try {
       const recorder = new PttRecorder({
         onDone: (blob, ms) => {
@@ -136,7 +206,7 @@ export const VoiceSidebar = memo(function VoiceSidebar(_props: VoiceInjected) {
   }
 
   const onMicClick = (): void => {
-    if (phase === 'saving') return
+    if (phase === 'saving' || phase === 'recognizing') return
     if (phase === 'recording') {
       stopRecording()
     } else {
@@ -144,71 +214,87 @@ export const VoiceSidebar = memo(function VoiceSidebar(_props: VoiceInjected) {
     }
   }
 
-  const toggleCollapsed = (): void => {
-    const next = !collapsed
-    setCollapsed(next)
-    try {
-      localStorage.setItem(PANEL_KEY, next ? '1' : '0')
-    } catch { /* ignore */ }
-  }
-
-  if (collapsed) {
-    return (
-      <button type="button" className={styles.rail} title="语音录音面板" onClick={toggleCollapsed}>
-        🎙️
-      </button>
-    )
+  /** 右上角图标：展开 / 隐藏。录音进行中不允许隐藏，避免失去停止入口。 */
+  const toggleHidden = (): void => {
+    if (phase === 'recording' || phase === 'saving' || phase === 'recognizing') {
+      showToast('请先结束当前录音')
+      return
+    }
+    const next = !hidden
+    setHidden(next)
+    writeHidden(next)
   }
 
   const recording = phase === 'recording'
-  const saving = phase === 'saving'
+  const busy = phase === 'saving' || phase === 'recognizing'
   const micClass = recording
     ? `${styles.micBtn} ${styles.micOn}`
-    : saving
+    : busy
       ? `${styles.micBtn} ${styles.micBusy}`
       : styles.micBtn
 
-  const statusText = saving
+  const statusText = phase === 'saving'
     ? '保存中…'
-    : recording
-      ? '正在录音，点按钮结束并保存'
-      : phase === 'error'
-        ? '出错了，见下方日志'
-        : '点开始录音（再点一次结束）'
+    : phase === 'recognizing'
+      ? '识别中…（首次较慢）'
+      : recording
+        ? '正在录音，点按钮结束'
+        : phase === 'error'
+          ? '出错了，见下方日志'
+          : '点开始录音（结束自动识别填入输入框）'
 
   return (
-    <div className={styles.root}>
-      <button type="button" className={styles.collapse} onClick={toggleCollapsed} title="收起">»</button>
-      <header className={styles.header}>
-        <span className={styles.title}>录音面板</span>
-        <span className={styles.subtitle}>V1 · 录音存 MP3</span>
-      </header>
+    <>
+      {/* 右上角常驻图标：展开 / 隐藏 */}
+      <button
+        type="button"
+        className={styles.toggle}
+        title={hidden ? '展开录音面板' : '隐藏录音面板'}
+        onClick={toggleHidden}
+      >
+        {hidden ? '🎙️' : '✕'}
+      </button>
 
-      <div className={styles.micArea}>
-        <button
-          type="button"
-          className={micClass}
-          title={recording ? '结束录音并保存' : '开始录音'}
-          disabled={saving}
-          onClick={onMicClick}
-        >
-          {saving ? '⏳' : recording ? '🔴' : '🎙️'}
-        </button>
-        <span className={recording ? `${styles.stateText} ${styles.stateRec}` : styles.stateText}>
-          {statusText}
-        </span>
-      </div>
+      {!hidden && (
+        <div className={styles.root}>
+          <header className={styles.header}>
+            <span className={styles.title}>录音面板</span>
+            <span className={styles.subtitle}>录音 → 存 MP3 → 识别入输入框</span>
+          </header>
 
-      <footer className={styles.footer}>
-        <div className={styles.hint}>保存位置：D:\dsh_workspeace\vocal\master（文件名 = 结束时刻）</div>
-        <div className={styles.logBox}>
-          {log.map((item, i) => (
-            <div key={i} className={item.bad === true ? `${styles.logLine} ${styles.logBad}` : styles.logLine}>
-              <span className={styles.logT}>{item.t}</span> {item.msg}
+          <div className={styles.micArea}>
+            <button
+              type="button"
+              className={micClass}
+              title={recording ? '结束录音并保存' : '开始录音'}
+              disabled={busy}
+              onClick={onMicClick}
+            >
+              {phase === 'saving' ? '⏳' : phase === 'recognizing' ? '✍️' : recording ? '🔴' : '🎙️'}
+            </button>
+            <span className={recording ? `${styles.stateText} ${styles.stateRec}` : styles.stateText}>
+              {statusText}
+            </span>
+          </div>
+
+          <footer className={styles.footer}>
+            <div className={styles.hint}>保存：D:\dsh_workspeace\vocal\master（文件名=结束时刻）</div>
+            <div className={styles.logBox}>
+              {log.map((item, i) => (
+                <div key={i} className={item.bad === true ? `${styles.logLine} ${styles.logBad}` : styles.logLine}>
+                  <span className={styles.logT}>{item.t}</span> {item.msg}
+                </div>
+              ))}
             </div>
-          ))}
+          </footer>
+
+          {toast !== null && (
+            <div className={styles.toast} role="alert" onClick={() => setToast(null)}>
+              {toast}
+            </div>
+          )}
         </div>
-      </footer>
-    </div>
+      )}
+    </>
   )
 })

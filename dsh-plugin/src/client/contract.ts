@@ -1,10 +1,13 @@
 /**
- * ui-voice-call V1 slot contract.
+ * ui-voice-call 槽位契约。
  *
- * V1 只做「按住录音 → MP3 落盘到本机 vocal/master」，不依赖任何会话服务，
- * 因此注入 face 为空。后续版本（语音转文字填入输入框 / 克隆音色朗读 / 打断）
- * 再在 VoiceInjected 上扩展会话绑定能力。
+ * V1: 录音存 MP3。V2.1: 识别文本追加进输入框草稿（不自动发送）。
+ * face 由插件 apply 按会话注入（conversation.input.dock 为 session 作用域）。
  */
 export interface VoiceInjected {
-  // V1: 无注入能力。保留空接口以便后续版本在不动槽位契约的情况下扩展。
+  /**
+   * 把一段识别文本「追加」到当前会话输入框草稿末尾（换行分隔），不发送。
+   * @returns 成功返回 null；失败返回面向面板的中文错误说明。
+   */
+  appendDraft?: (text: string) => string | null
 }

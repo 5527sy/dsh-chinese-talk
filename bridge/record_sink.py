@@ -1,29 +1,41 @@
-"""record-sink — DSH 录音面板 V1 的落盘服务（轻量，不加载任何模型）。
+"""record-sink — DSH 录音面板的落盘 + 中文识别服务（轻量，模型懒加载）。
 
 浏览器点击开始/结束录音（MediaRecorder，webm/opus）→ 结束后上传音频 →
 本服务用 ffmpeg 转成 MP3，以结束那一秒的年月日时分秒命名（如
 20260212103015.mp3）保存到输出目录（默认 <项目根的上一级>/vocal/master，
 即本机 D:\\dsh_workspeace\\vocal\\master）。也接受 WAV（兼容调试）。
 
+V2.1 起同时提供中文语音识别：
+  POST /api/stt  上传任意音频（webm/mp3/wav…）→ ffmpeg 转 16k PCM →
+                  FunASR Paraformer-large（中文，16k）→ { ok, text }
+模型首次调用时懒加载（GPU 上约 10~60s），之后每次毫秒~秒级。
+
 端点：
-  GET  /api/health             -> {status, out_dir, ffmpeg}
+  GET  /api/health             -> {status, out_dir, ffmpeg, stt}
   POST /api/record             body=任意 ffmpeg 可解码音频
                                header X-Record-Ms=录音时长(ms)
                                -> {ok, file, path, seconds, bytes}
+  POST /api/stt                body=任意 ffmpeg 可解码音频（同 record）
+                               -> {ok, text, language, seconds}
 
 配置（优先级从高到低）：
   输出目录 : 启动参数 --out-dir  >  环境变量 DSH_VOCAL_DIR  >  默认(见下)
   ffmpeg   : 环境变量 FFMPEG_BIN  >  PATH 中的 ffmpeg  >  已知默认安装路径
+  ASR 模型 : 环境变量 FUNASR_DIR  >  已知本地路径  >  ModelScope 模型 id
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import subprocess
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -32,6 +44,12 @@ from fastapi.responses import JSONResponse
 FFMPEG_FALLBACKS = [
     Path(r"D:\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"),
 ]
+
+# FunASR Paraformer-large 中文 ASR（16k）本地路径；不存在则退回 ModelScope id。
+FUNASR_DEFAULT = Path(
+    r"D:\models\funasr\speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+)
+FUNASR_MODELSCOPE_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
 ALLOW_ORIGINS = [
     "http://127.0.0.1:3080",
@@ -90,7 +108,12 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    return {"status": "ok", "out_dir": str(OUT_DIR), "ffmpeg": "ok" if FFMPEG else "missing"}
+    return {
+        "status": "ok",
+        "out_dir": str(OUT_DIR),
+        "ffmpeg": "ok" if FFMPEG else "missing",
+        "stt": "ready" if _STT_MODEL is not None else "cold",
+    }
 
 
 def wav_seconds(data: bytes) -> Optional[float]:
@@ -196,6 +219,111 @@ async def record(request: Request) -> JSONResponse:
         "seconds": round(seconds, 2),
         "bytes": out.stat().st_size,
     })
+
+
+# ──────────────────────────────── 中文识别 (V2.1) ──────────────────────────────
+_STT_MODEL = None
+_STT_LOCK = threading.Lock()
+
+
+def stt_model_name() -> str:
+    env = os.environ.get("FUNASR_DIR")
+    if env:
+        return env
+    if FUNASR_DEFAULT.is_dir():
+        return str(FUNASR_DEFAULT)
+    return FUNASR_MODELSCOPE_ID
+
+
+def _load_stt_model():
+    """懒加载 FunASR Paraformer-large（中文 16k）。线程安全，只加载一次。"""
+    global _STT_MODEL  # noqa: PLW0603
+    if _STT_MODEL is not None:
+        return _STT_MODEL
+    with _STT_LOCK:
+        if _STT_MODEL is not None:
+            return _STT_MODEL
+        import torch
+        from funasr import AutoModel
+
+        cuda = torch.cuda.is_available()
+        print(f"[record-sink] STT 加载模型: {stt_model_name()} (cuda={cuda})", flush=True)
+        _STT_MODEL = AutoModel(
+            model=stt_model_name(),
+            trust_remote_code=True,
+            device="cuda" if cuda else "cpu",
+            dtype="float16" if cuda else "float32",
+        )
+    return _STT_MODEL
+
+
+def _transcribe(model, pcm16: bytes) -> str:
+    """16k 单声道小端 PCM16 → 文本。空/异常一律返回空串。"""
+    audio = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+    audio = np.ascontiguousarray(audio, dtype=np.float32)
+    result = model.generate(input=audio, cache={})
+    return (result[0].get("text") or "").strip() if result else ""
+
+
+def _run_stt(body: bytes, content_type: str, record_ms: int) -> dict:
+    """同步执行 STT：转 16k PCM → 懒加载模型 → 转写。"""
+    if FFMPEG is None:
+        raise RuntimeError("ffmpeg not found — set FFMPEG_BIN")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_dir = OUT_DIR / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = EXT_BY_TYPE.get(content_type, ".bin")
+    token = uuid.uuid4().hex[:12]
+    src = tmp_dir / f"_stt_{token}{ext}"
+    pcm = tmp_dir / f"_stt_{token}.pcm"
+    try:
+        src.write_bytes(body)
+        proc = subprocess.run(
+            [
+                str(FFMPEG), "-y",
+                "-i", str(src),
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "s16le",
+                str(pcm),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
+            raise RuntimeError(f"ffmpeg decode failed: {tail}")
+        pcm_bytes = pcm.read_bytes()
+        if len(pcm_bytes) < 3200:  # < 0.1s
+            return {"ok": True, "text": "", "language": "zh", "seconds": record_ms / 1000.0}
+        model = _load_stt_model()
+        text = _transcribe(model, pcm_bytes)
+        return {"ok": True, "text": text, "language": "zh", "seconds": record_ms / 1000.0}
+    finally:
+        try:
+            src.unlink(missing_ok=True)
+            pcm.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.post("/api/stt")
+async def stt(request: Request) -> JSONResponse:
+    """中文语音识别：任意 ffmpeg 可解码音频 -> { ok, text }。首次调用加载模型较慢。"""
+    body = await request.body()
+    if len(body) < 256:
+        return JSONResponse({"ok": False, "error": "empty or too-small payload"}, status_code=400)
+    try:
+        ms = int(request.headers.get("x-record-ms", "0"))
+    except ValueError:
+        ms = 0
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    try:
+        result = await asyncio.to_thread(_run_stt, body, content_type, ms)
+        return JSONResponse(result)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"stt failed: {err}"}, status_code=500)
 
 
 def main() -> None:
