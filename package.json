@@ -17,12 +17,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/5527sy/dsh-tts-edge.git"
+    "url": "git+https://github.com/5527sy/dsh-chinese-talk.git"
   },
   "bugs": {
-    "url": "https://github.com/5527sy/dsh-tts-edge/issues"
+    "url": "https://github.com/5527sy/dsh-chinese-talk/issues"
   },
-  "homepage": "https://github.com/5527sy/dsh-tts-edge#readme",
+  "homepage": "https://github.com/5527sy/dsh-chinese-talk#readme",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

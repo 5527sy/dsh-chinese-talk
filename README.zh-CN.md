@@ -25,7 +25,7 @@ dsh plugin --profile web add .
 发布 Release 后从 GitHub 安装：
 
 ```powershell
-dsh plugin --profile web add github:5527sy/dsh-tts-edge#v0.2.0
+dsh plugin --profile web add github:5527sy/dsh-chinese-talk#v0.2.0
 ```
 
 Git 依赖会执行本包的 `prepare` 构建。pnpm 10 及以上版本可能要求在 profile 的 `pnpm-workspace.yaml` 中允许本包执行构建。也可以发布预构建 tarball，避免安装阶段执行脚本：

@@ -25,7 +25,7 @@ dsh plugin --profile web add .
 From GitHub after a release is published:
 
 ```powershell
-dsh plugin --profile web add github:5527sy/dsh-tts-edge#v0.2.0
+dsh plugin --profile web add github:5527sy/dsh-chinese-talk#v0.2.0
 ```
 
 Git dependencies run the package `prepare` script. pnpm 10+ may ask you to allow this package under the profile's `pnpm-workspace.yaml`. A release tarball avoids install-time builds:

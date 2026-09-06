@@ -23,8 +23,8 @@ dependencies = [
 dsh-chinese-talk-bridge = "bridge.record_sink:main"
 
 [project.urls]
-Homepage = "https://github.com/5527sy/dsh-tts-edge"
-Issues = "https://github.com/5527sy/dsh-tts-edge/issues"
+Homepage = "https://github.com/5527sy/dsh-chinese-talk"
+Issues = "https://github.com/5527sy/dsh-chinese-talk/issues"
 
 [tool.setuptools]
 packages = ["bridge"]
