@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dsh-chinese-talk-bridge"
+version = "0.2.0"
+description = "Local speech bridge for the dsh-chinese-talk DeepSeek Harness plugin"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "dsh-chinese-talk contributors" }]
+dependencies = [
+  "edge-tts",
+  "fastapi",
+  "funasr",
+  "modelscope",
+  "numpy",
+  "uvicorn",
+]
+
+[project.scripts]
+dsh-chinese-talk-bridge = "bridge.record_sink:main"
+
+[project.urls]
+Homepage = "https://github.com/5527sy/dsh-tts-edge"
+Issues = "https://github.com/5527sy/dsh-tts-edge/issues"
+
+[tool.setuptools]
+packages = ["bridge"]
+
+[tool.setuptools.package-data]
+bridge = ["*.ps1", "*.cmd", "*.sh", "requirements.txt"]

@@ -2,7 +2,7 @@
 
 浏览器点击开始/结束录音（MediaRecorder，webm/opus）→ 结束后上传音频 →
 本服务用 ffmpeg 转成 MP3，以结束那一秒的年月日时分秒命名（如
-20260212103015.mp3）保存到输出目录（默认 <项目根>/vocal/master，可用
+20260212103015.mp3）保存到输出目录（默认 <启动目录>/vocal/master，可用
 --out-dir 或 DSH_VOCAL_DIR 覆盖）。也接受 WAV（兼容调试）。
 
 V2.1 起同时提供中文语音识别：
@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -42,25 +44,31 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# 项目根：本文件位于 <项目根>/bridge/record_sink.py，故取 parents[1]。
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ROOT = Path.cwd()
 
-# ffmpeg 定位顺序：FFMPEG_BIN 环境变量 > 项目内 <根>/ffmpeg/bin/ffmpeg.exe > PATH。
-# 本机 ffmpeg 若装在系统别处（如 D:\ffmpeg），请在启动脚本里用 FFMPEG_BIN/FFPLAY_BIN 指向。
+# ffmpeg 定位顺序：FFMPEG_BIN 环境变量 > 启动目录内 ffmpeg/bin > PATH。
 FFMPEG_FALLBACKS = [
-    PROJECT_ROOT / "ffmpeg" / "bin" / "ffmpeg.exe",
+    RUNTIME_ROOT / "ffmpeg" / "bin" / "ffmpeg.exe",
+    RUNTIME_ROOT / "ffmpeg" / "bin" / "ffmpeg",
 ]
 
-# FunASR Paraformer-large 中文 ASR（16k）：FUNASR_DIR 环境变量 > <根>/models/... > ModelScope id。
-FUNASR_DEFAULT = PROJECT_ROOT / "models" / "funasr" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+# FunASR Paraformer-large 中文 ASR（16k）：FUNASR_DIR > 启动目录模型 > ModelScope id。
+FUNASR_DEFAULT = RUNTIME_ROOT / "models" / "funasr" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 FUNASR_MODELSCOPE_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
-ALLOW_ORIGINS = [
+DEFAULT_ALLOW_ORIGINS = [
     "http://127.0.0.1:3080",
     "http://localhost:3080",
     "http://127.0.0.1:3081",
     "http://localhost:3081",
 ]
+
+
+def configured_origins() -> list[str]:
+    """Return explicitly configured CORS origins or the local Harness defaults."""
+    raw = os.environ.get("DSH_BRIDGE_ORIGINS", "")
+    origins = [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+    return origins or DEFAULT_ALLOW_ORIGINS
 
 # 按 Content-Type 选临时文件扩展名（ffmpeg 实际按内容探测格式）。
 EXT_BY_TYPE = {
@@ -79,12 +87,12 @@ EXT_BY_TYPE = {
 
 
 def default_out_dir() -> Path:
-    """默认输出 = <项目根>/vocal/master（相对 PROJECT_ROOT，无盘符写死）。
+    """默认输出 = <启动目录>/vocal/master，不包含机器专用绝对路径。
 
-    录音 MP3 存 <项目根>/vocal/master，回答 txt 存 <项目根>/vocal/answer
+    录音 MP3 存 <启动目录>/vocal/master，回答 txt 存 <启动目录>/vocal/answer
     （vocal/ 已在 .gitignore，不会进库）。可用 --out-dir 或 DSH_VOCAL_DIR 覆盖。
     """
-    return PROJECT_ROOT / "vocal" / "master"
+    return RUNTIME_ROOT / "vocal" / "master"
 
 
 def resolve_ffmpeg() -> Optional[Path]:
@@ -100,10 +108,10 @@ def resolve_ffmpeg() -> Optional[Path]:
 OUT_DIR = default_out_dir()
 FFMPEG: Optional[Path] = resolve_ffmpeg()
 
-app = FastAPI(title="dsh record-sink (V1)")
+app = FastAPI(title="dsh-chinese-talk bridge")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origins=configured_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -117,7 +125,11 @@ def health() -> dict:
         "out_dir": str(OUT_DIR),
         "ffmpeg": "ok" if FFMPEG else "missing",
         "stt": "ready" if _STT_MODEL is not None else "cold",
-        "speaker": "edge/sapi",
+        "speaker": {
+            "edge_tts": "ok" if _edge_command() is not None else "missing",
+            "ffplay": "ok" if _resolve_ffplay() is not None else "missing",
+            "sapi": "available" if os.name == "nt" else "unsupported",
+        },
     }
 
 
@@ -366,8 +378,11 @@ async def stt(request: Request) -> JSONResponse:
 import queue as _queue
 import tempfile as _tempfile
 
-# ffplay：FFPLAY_BIN 环境变量 > <根>/ffmpeg/bin/ffplay.exe > PATH。
-FFPLAY_DEFAULT = PROJECT_ROOT / "ffmpeg" / "bin" / "ffplay.exe"
+# ffplay：FFPLAY_BIN 环境变量 > 启动目录内 ffmpeg/bin > PATH。
+FFPLAY_FALLBACKS = [
+    RUNTIME_ROOT / "ffmpeg" / "bin" / "ffplay.exe",
+    RUNTIME_ROOT / "ffmpeg" / "bin" / "ffplay",
+]
 
 _SPEECH_QUEUE = _queue.Queue()
 _SPEECH_THREAD = None
@@ -409,16 +424,26 @@ def _sanitize_tts_text(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _edge_exe() -> Optional[Path]:
-    """edge-tts（微软在线晓晓，venv-speech 内安装）可执行文件。"""
-    p = Path(__file__).resolve().parents[1] / "venv-speech" / "Scripts" / "edge-tts.exe"
-    return p if p.is_file() else None
+def _edge_command() -> Optional[list[str]]:
+    """Resolve edge-tts from an explicit path, PATH, or the active Python environment."""
+    configured = os.environ.get("EDGE_TTS_BIN")
+    if configured:
+        return [configured]
+    executable = shutil.which("edge-tts")
+    if executable:
+        return [executable]
+    if importlib.util.find_spec("edge_tts") is not None:
+        return [sys.executable, "-m", "edge_tts"]
+    return None
 
 
 def _play_file_wait(path: Path) -> None:
     global _SPEECH_CURRENT  # noqa: PLW0603
+    player = _resolve_ffplay()
+    if player is None:
+        raise RuntimeError("ffplay 不可用，请安装 ffmpeg 或设置 FFPLAY_BIN")
     play = subprocess.Popen(
-        [str(_resolve_ffplay()), "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
+        [str(player), "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -434,12 +459,17 @@ def _play_file_wait(path: Path) -> None:
 
 def _speak_sapi_piece(text: str) -> None:
     """本机 SAPI 离线兜底（speak.ps1，System.Speech，优先 Huihui 中文）。"""
+    if os.name != "nt":
+        raise RuntimeError("SAPI 兜底仅支持 Windows")
     engine = Path(__file__).resolve().parent / "speak.ps1"
     if not engine.is_file():
         raise RuntimeError(f"speak.ps1 不存在: {engine}")
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        raise RuntimeError("PowerShell 不可用，无法调用 SAPI")
     proc = subprocess.Popen(
         [
-            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(engine), "-Text", text,
         ],
         stdout=subprocess.DEVNULL,
@@ -459,9 +489,10 @@ def _speak_sapi_piece(text: str) -> None:
 
 def _speak_edge_piece(text: str) -> None:
     """edge-tts(晓晓在线) 合成一段 mp3 -> ffplay 播放；失败自动重试，最终抛错。"""
-    exe = _edge_exe()
-    if exe is None:
-        raise RuntimeError("edge-tts 不可用（venv-speech 内未找到 edge-tts.exe）")
+    command = _edge_command()
+    if command is None:
+        raise RuntimeError("edge-tts 不可用，请安装依赖或设置 EDGE_TTS_BIN")
+    voice = os.environ.get("DSH_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
     last = "unknown"
     for attempt in range(1, 4):  # NoAudioReceived/节流：自动重试 3 次
         if _SPEECH_STOP.is_set():
@@ -470,7 +501,7 @@ def _speak_edge_piece(text: str) -> None:
         os.close(fd)
         try:
             _r = subprocess.run(
-                [str(exe), "--voice", "zh-CN-XiaoxiaoNeural", "--text", text, "--write-media", path],
+                [*command, "--voice", voice, "--text", text, "--write-media", path],
                 capture_output=True,
                 timeout=120,
             )
@@ -520,13 +551,15 @@ def _speech_worker() -> None:
                 _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
 
 
-def _resolve_ffplay() -> Path:
+def _resolve_ffplay() -> Optional[Path]:
     env = os.environ.get("FFPLAY_BIN")
     if env and Path(env).is_file():
         return Path(env)
-    if FFPLAY_DEFAULT.is_file():
-        return FFPLAY_DEFAULT
-    return Path(shutil.which("ffplay")) if shutil.which("ffplay") else FFPLAY_DEFAULT
+    for candidate in FFPLAY_FALLBACKS:
+        if candidate.is_file():
+            return candidate
+    executable = shutil.which("ffplay")
+    return Path(executable) if executable else None
 
 
 def _ensure_speech_worker() -> None:
@@ -539,7 +572,8 @@ def _ensure_speech_worker() -> None:
 
 @app.post("/api/speak")
 async def speak(request: Request) -> JSONResponse:
-    """整段文本入队朗读（仅 edge-tts 晓晓在线，服务端合成+ffplay 出声，串行）。"""
+    """整段文本入队朗读（Edge TTS 优先，Windows SAPI 兜底，串行播放）。"""
+    global _SPEECH_ERROR  # noqa: PLW0603
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001
@@ -547,8 +581,8 @@ async def speak(request: Request) -> JSONResponse:
     text = _sanitize_tts_text(str(payload.get("text") or ""))
     if not text:
         return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
-    if not _resolve_ffplay().is_file():
-        return JSONResponse({"ok": False, "error": f"ffplay 不存在: {_resolve_ffplay()}"}, status_code=500)
+    if _resolve_ffplay() is None:
+        return JSONResponse({"ok": False, "error": "ffplay 不可用，请安装 ffmpeg 或设置 FFPLAY_BIN"}, status_code=500)
     try:
         _ensure_speech_worker()
         with _SPEECH_STATE_LOCK:
@@ -595,7 +629,7 @@ def speech_status() -> dict:
 
 def main() -> None:
     global OUT_DIR  # noqa: PLW0603
-    parser = argparse.ArgumentParser(description="DSH record-sink (V1)")
+    parser = argparse.ArgumentParser(description="dsh-chinese-talk local speech bridge")
     parser.add_argument("--out-dir", help="MP3 输出目录（默认 DSH_VOCAL_DIR 或 ../vocal/master）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)

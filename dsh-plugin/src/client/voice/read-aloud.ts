@@ -1,7 +1,7 @@
 /**
  * ReadAloud（V3，服务端播放版）—— 参考 dsh-speak 架构：
  * 插件只负责在事件流里挑「最终回复」，把整段文本交给本机 record-sink(:8766)；
- * sink 用 Qwen3 克隆音色合成，并 ffplay 在本机出声（串行队列、可停止），
+ * sink 用 Edge TTS 合成，并通过 ffplay 在本机出声（串行队列、可停止），
  * 不依赖浏览器 autoplay。
  */
 import { log } from './log-bus.ts'

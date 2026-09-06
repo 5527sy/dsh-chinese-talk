@@ -1,0 +1,85 @@
+{
+  "name": "dsh-chinese-talk",
+  "version": "0.2.0",
+  "description": "Installable DeepSeek Harness Web bundle for Chinese speech input, local transcription, answer archiving, and reply read-aloud",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "speech-to-text",
+    "text-to-speech",
+    "funasr",
+    "chinese"
+  ],
+  "license": "Apache-2.0",
+  "author": "dsh-chinese-talk contributors",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/5527sy/dsh-tts-edge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/5527sy/dsh-tts-edge/issues"
+  },
+  "homepage": "https://github.com/5527sy/dsh-tts-edge#readme",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "bridge/**/*.py",
+    "bridge/*.ps1",
+    "bridge/*.cmd",
+    "bridge/*.sh",
+    "bridge/requirements.txt",
+    "pyproject.toml",
+    "README.md",
+    "README.zh-CN.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "pnpm run clean && tsdown",
+    "prepare": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm run typecheck && pnpm run build && node scripts/verify-package.mjs",
+    "pack:plugin": "pnpm pack"
+  },
+  "devDependencies": {
+    "@types/react": "~18.3.31",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  }
+}

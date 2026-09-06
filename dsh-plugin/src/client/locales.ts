@@ -3,7 +3,7 @@
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
   'panel.title': '语音通话',
-  'panel.subtitle': '本地语音桥 · Qwen3-TTS 克隆',
+  'panel.subtitle': '本地语音桥 · FunASR + Edge TTS',
   'mic.idle': '开始聆听',
   'mic.listening': '聆听中…再点一次停止',
   'mic.transcribing': '识别中…',
@@ -26,7 +26,7 @@ export type VoiceKey = keyof typeof zh
 /** English dictionary, checked complete against the zh key set. */
 export const en = {
   'panel.title': 'Voice call',
-  'panel.subtitle': 'Local voice bridge · Qwen3-TTS clone',
+  'panel.subtitle': 'Local voice bridge · FunASR + Edge TTS',
   'mic.idle': 'Start listening',
   'mic.listening': 'Listening… click again to stop',
   'mic.transcribing': 'Transcribing…',

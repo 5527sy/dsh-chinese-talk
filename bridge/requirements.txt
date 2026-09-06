@@ -1,11 +1,7 @@
-# record-sink 运行依赖（本机语音服务，:8766）。
-# STT(FunASR) 会自带 torch/transformers/numpy 等。
-#   pip install -r requirements.txt
-# 国内加速：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# Local bridge dependencies. FunASR installs its own ML runtime dependencies.
 fastapi
 uvicorn
 numpy
 funasr
 modelscope
-# 朗读：edge-tts（微软在线晓晓）；不可用时回退本机 SAPI(Huihui)，后者无需任何依赖。
 edge-tts

@@ -1,5 +1,5 @@
-dsh-voice-call
-Copyright (c) 2026 dsh-voice-call authors
+dsh-chinese-talk
+Copyright (c) 2026 dsh-chinese-talk authors
 
 This project is a derivative of:
 
@@ -10,12 +10,11 @@ This project is a derivative of:
   https://www.apache.org/licenses/LICENSE-2.0
 
 Portions are based on HuggingFace speech-to-speech (Apache-2.0) and
-deepseek-harness (MIT). The bridge/plugin sources under `bridge/` and
-`dsh-plugin/` include code adapted from the project above.
+deepseek-harness (MIT). The bridge and browser plugin sources include code
+adapted from the project above.
 
-Third-party model usage:
+Runtime integrations:
   - FunASR Paraformer (ModelScope / FunASR, MIT)
-  - Qwen3-TTS-12Hz-1.7B-Base (Apache-2.0)
-  - silero-vad (MIT)
+  - Microsoft Edge TTS service through edge-tts (LGPL-3.0)
 
 SPDX-License-Identifier: Apache-2.0

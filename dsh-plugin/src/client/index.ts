@@ -6,7 +6,7 @@
  *  - 点 🎙️ 开始录音 → 点击结束 → record-sink(:8766) 存 MP3（结束时刻命名）
  *  - 自动 /api/stt 中文识别 → 文本智能填入「最后点过的输入框」，否则追加主输入框
  *  - V3.1：当前会话「正式回答」→ txt 存到 vocal/answer
- *  - V3：正式回答用克隆音色朗读（服务端合成+ffplay 播放，参考 dsh-speak 思路）
+ *  - V3：正式回答通过 Edge TTS 朗读（服务端合成+ffplay 播放）
  *
  * 事件流契约：binding.eventSource（SessionEventWindow）。
  * 回答判定：以 append 里的 `turn/end`（回合结束）为准 → 反扫窗口取该回合最后
@@ -115,10 +115,10 @@ function appendToCurrentDraft(ctx: Context, text: string): string | null {
     if (after !== next && !after.includes(text)) {
       return `写入未生效（当前草稿 ${after.length} 字，疑似编辑器忙碌中）`
     }
-    console.log(`[ui-voice-call] draft appended: +${text.length} 字（共 ${next.length} 字）`)
+    console.log(`[dsh-chinese-talk] draft appended: +${text.length} 字（共 ${next.length} 字）`)
     return null
   } catch (err) {
-    console.warn('[ui-voice-call] appendDraft failed:', err)
+    console.warn('[dsh-chinese-talk] appendDraft failed:', err)
     return `写入失败：${err instanceof Error ? err.message : String(err)}`
   }
 }
@@ -205,18 +205,18 @@ function scanLatestAnswer(win: EventWindow | undefined): { turn: number; text: s
  * @param ctx - client root context.
  */
 function applyImpl(ctx: Context): void {
-  console.log('[ui-voice-call] V3 loaded (shell.overlay; record/STT/answer/speak via :8766)')
+  console.log('[dsh-chinese-talk] loaded (shell.overlay; record/STT/answer/speak via :8766)')
 
   try {
-    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-voice-call: dictionaries')
+    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-chinese-talk: dictionaries')
   } catch (err) {
-    console.warn('[ui-voice-call] locale register skipped:', err)
+    console.warn('[dsh-chinese-talk] locale register skipped:', err)
   }
 
   ctx.effect(() => {
     setDraftWriter((text: string) => appendToCurrentDraft(ctx, text))
     return () => setDraftWriter(null)
-  }, 'ui-voice-call: draft writer')
+  }, 'dsh-chinese-talk: draft writer')
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
@@ -252,7 +252,7 @@ function applyImpl(ctx: Context): void {
       log(`收到正式回答（turn ${turn}，${text.length} 字）`)
       const err = await saveAnswerText(text)
       if (err !== null && err !== undefined) log(err, true)
-      // V3: 服务端合成+播放克隆音色朗读。
+      // 服务端合成并播放 Edge TTS 语音。
       if (reader.enabled) {
         void reader.speak(text)
       }
@@ -339,7 +339,7 @@ function applyImpl(ctx: Context): void {
       offList?.()
       stopSource()
     }
-  }, 'ui-voice-call: final answer -> txt + speak')
+  }, 'dsh-chinese-talk: final answer -> txt + speak')
 }
 
 /**
@@ -351,16 +351,16 @@ function applyImpl(ctx: Context): void {
 export function apply(ctx: Context): void {
   try {
     applyImpl(ctx)
-    console.log('[ui-voice-call] boot OK')
+    console.log('[dsh-chinese-talk] boot OK')
   } catch (err) {
     const text = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
-    console.error('[ui-voice-call] apply failed:', err)
+    console.error('[dsh-chinese-talk] apply failed:', err)
     try {
       setTimeout(() => {
         const el = document.createElement('div')
         el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#c0392b;color:#fff;' +
           'padding:10px 12px;font:12px/1.5 sans-serif;white-space:pre-wrap;word-break:break-all;'
-        el.textContent = '[ui-voice-call 启动失败] ' + text
+        el.textContent = '[dsh-chinese-talk 启动失败] ' + text
         document.body?.appendChild(el)
       }, 1200)
     } catch { /* banner best-effort */ }
