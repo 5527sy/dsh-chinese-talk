@@ -1,12 +1,11 @@
-# 语音桥运行依赖。
-# speech-to-speech（HuggingFace, Apache-2.0）自带 torch/torchaudio/transformers/numpy，
-# 并提供 Qwen3TTSHandler（Qwen3-TTS 参考音频克隆）与 VADIterator。
+# record-sink 运行依赖（本机语音服务，:8766）。
+# STT(FunASR) 会自带 torch/transformers/numpy 等。
 #   pip install -r requirements.txt
 # 国内加速：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-speech-to-speech==0.2.10
 fastapi
 uvicorn
-soundfile
-scipy
+numpy
 funasr
 modelscope
+# 朗读：edge-tts（微软在线晓晓）；不可用时回退本机 SAPI(Huihui)，后者无需任何依赖。
+edge-tts

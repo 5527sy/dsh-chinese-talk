@@ -306,7 +306,7 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
           </div>
 
           <footer className={styles.footer}>
-            <div className={styles.hint}>保存：D:\dsh_workspeace\vocal\master（文件名=结束时刻）</div>
+            <div className={styles.hint}>保存：vocal/master（文件名=结束时刻，实际目录见服务端 /api/health）</div>
             <div className={styles.logBox}>
               {log.map((item, i) => (
                 <div key={i} className={item.bad === true ? `${styles.logLine} ${styles.logBad}` : styles.logLine}>

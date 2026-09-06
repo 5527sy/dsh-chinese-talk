@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """register_plugin — 把 dsh-plugin 复制进 deepseek-harness 并完成三处注册（幂等）。
 
-目标：D:/deepseekharness（dsh-v0.1.3-alpha.1）
+目标：deepseek-harness（DSH_HARNESS 覆盖，默认 <workspace>/../deepseekharness）
 三处注册：
   1) tsconfig.client.json   references 加 packages/client/ui-voice-call
   2) packages/bundle/web-app/cordis.patch.yml  加 ui-voice-call roster 行
@@ -16,8 +16,15 @@ import re
 import shutil
 from pathlib import Path
 
-HARNESS = Path("D:/deepseekharness")
-PLUGIN_SRC = Path(__file__).resolve().parent.parent / "dsh-plugin"
+# 目标 harness 目录：优先 DSH_HARNESS 环境变量；否则按本脚本所在层级相对推导
+#（期望 deepseekharness 与“工作区根目录”同级，即 <workspace>/../deepseekharness）。
+_SCRIPT = Path(__file__).resolve()
+HARNESS = (
+    Path(os.environ["DSH_HARNESS"])
+    if os.environ.get("DSH_HARNESS")
+    else _SCRIPT.parents[3] / "deepseekharness"
+)
+PLUGIN_SRC = _SCRIPT.parent.parent / "dsh-plugin"
 DEST = HARNESS / "packages" / "client" / "ui-voice-call"
 PKG = "@deepseek-ai/dsh-client-ui-voice-call"
 ROW_ID = "ui-voice-call"
@@ -121,7 +128,7 @@ def main() -> None:
     step1_tsconfig()
     step2_patch()
     step3_webapp_pkg()
-    log("全部完成。接下来在 D:/deepseekharness 执行：pnpm install 然后构建。")
+    log(f"全部完成。接下来在 {HARNESS} 执行：pnpm install 然后构建。")
 
 
 if __name__ == "__main__":

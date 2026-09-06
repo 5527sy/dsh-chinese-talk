@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-client-ui-voice-call",
-  "description": "DSH voice call (voice conversation): mic capture -> bridge FunASR STT -> conversation.send; reply sentence-streaming Qwen3-TTS clone reading; barge-in/queue modes; dock voice panel",
+  "description": "DSH voice record panel: mic record -> local record-sink(:8766) FunASR STT -> append into draft/input; auto-save final answer to txt; read replies aloud via edge-tts with local SAPI(Huihui) fallback; stops playback when the page closes",
   "version": "0.1.0-alpha.1",
   "publishConfig": {
     "access": "public"

@@ -2,8 +2,8 @@
 
 浏览器点击开始/结束录音（MediaRecorder，webm/opus）→ 结束后上传音频 →
 本服务用 ffmpeg 转成 MP3，以结束那一秒的年月日时分秒命名（如
-20260212103015.mp3）保存到输出目录（默认 <项目根的上一级>/vocal/master，
-即本机 D:\\dsh_workspeace\\vocal\\master）。也接受 WAV（兼容调试）。
+20260212103015.mp3）保存到输出目录（默认 <工作区>/vocal/master，由本文件所在层级
+相对推导，可用 --out-dir 或 DSH_VOCAL_DIR 覆盖）。也接受 WAV（兼容调试）。
 
 V2.1 起同时提供中文语音识别：
   POST /api/stt  上传任意音频（webm/mp3/wav…）→ ffmpeg 转 16k PCM →
@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -39,17 +40,19 @@ from typing import Optional
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
-# 若 ffmpeg 不在 PATH，且未设置 FFMPEG_BIN，则回退到这个默认路径（可自行修改）。
+# 项目根：本文件位于 <项目根>/bridge/record_sink.py，故取 parents[1]。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# ffmpeg 定位顺序：FFMPEG_BIN 环境变量 > 项目内 <根>/ffmpeg/bin/ffmpeg.exe > PATH。
+# 本机 ffmpeg 若装在系统别处（如 D:\ffmpeg），请在启动脚本里用 FFMPEG_BIN/FFPLAY_BIN 指向。
 FFMPEG_FALLBACKS = [
-    Path(r"D:\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"),
+    PROJECT_ROOT / "ffmpeg" / "bin" / "ffmpeg.exe",
 ]
 
-# FunASR Paraformer-large 中文 ASR（16k）本地路径；不存在则退回 ModelScope id。
-FUNASR_DEFAULT = Path(
-    r"D:\models\funasr\speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
-)
+# FunASR Paraformer-large 中文 ASR（16k）：FUNASR_DIR 环境变量 > <根>/models/... > ModelScope id。
+FUNASR_DEFAULT = PROJECT_ROOT / "models" / "funasr" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 FUNASR_MODELSCOPE_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
 ALLOW_ORIGINS = [
@@ -76,10 +79,10 @@ EXT_BY_TYPE = {
 
 
 def default_out_dir() -> Path:
-    """默认输出 = <项目根的上一级>/vocal/master。
+    """默认输出 = <工作区>/vocal/master（相对本文件推导，无盘符写死）。
 
-    bridge/record_sink.py 的 parents: [bridge, 项目根, 工作区]。
-    本机布局：D:\\dsh_workspeace\\dsh-voice-call\\bridge → D:\\dsh_workspeace\\vocal\\master。
+    取 __file__ 的 parents[2]（bridge → 项目根 → 工作区），再拼 vocal/master。
+    也可用启动参数 --out-dir 或环境变量 DSH_VOCAL_DIR 覆盖。
     """
     return Path(__file__).resolve().parents[2] / "vocal" / "master"
 
@@ -91,7 +94,7 @@ def resolve_ffmpeg() -> Optional[Path]:
     for cand in FFMPEG_FALLBACKS:
         if cand.is_file():
             return cand
-    return None
+    return Path(shutil.which("ffmpeg")) if shutil.which("ffmpeg") else None
 
 
 OUT_DIR = default_out_dir()
@@ -114,7 +117,7 @@ def health() -> dict:
         "out_dir": str(OUT_DIR),
         "ffmpeg": "ok" if FFMPEG else "missing",
         "stt": "ready" if _STT_MODEL is not None else "cold",
-        "tts": "ready" if _TTS_HANDLER is not None else "cold",
+        "speaker": "edge/sapi",
     }
 
 
@@ -359,18 +362,12 @@ async def stt(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": f"stt failed: {err}"}, status_code=500)
 
 
-# ──────────────────────────── 克隆朗读 + 服务端播放 (V3) ───────────────────────
+# ─────────────────────── 回答朗读：edge-tts 在线 + 本机 SAPI 兜底 ───────────────
 import queue as _queue
 import tempfile as _tempfile
 
-QWEN3_TTS_DEFAULT = Path(r"D:\models\Qwen3-TTS-12Hz-1.7B-Base")
-VOICE_DIR_DEFAULT = Path(__file__).resolve().parents[1] / "voices" / "我的声音"
-FFPLAY_DEFAULT = Path(r"D:\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffplay.exe")
-# 单段合成字数上限（服务端再按句切小段，串行合成+播放）。
-TTS_CHUNK_MAX = 400
-
-_TTS_HANDLER = None
-_TTS_LOCK = threading.Lock()
+# ffplay：FFPLAY_BIN 环境变量 > <根>/ffmpeg/bin/ffplay.exe > PATH。
+FFPLAY_DEFAULT = PROJECT_ROOT / "ffmpeg" / "bin" / "ffplay.exe"
 
 _SPEECH_QUEUE = _queue.Queue()
 _SPEECH_THREAD = None
@@ -380,83 +377,6 @@ _SPEECH_CURRENT = None  # 当前正在播放的 ffplay Popen
 _SPEECH_STATE_LOCK = threading.Lock()
 _SPEECH_STATE = {"speaking": False, "queue": 0}
 _SPEECH_ERROR = ""
-
-
-def _voice_dir() -> Path:
-    env = os.environ.get("DSH_VOICE_DIR")
-    return Path(env) if env else VOICE_DIR_DEFAULT
-
-
-def _load_tts_handler():
-    """懒加载 Qwen3TTSHandler（克隆音色；参考音频/文本在加载时读入）。"""
-    global _TTS_HANDLER  # noqa: PLW0603
-    if _TTS_HANDLER is not None:
-        return _TTS_HANDLER
-    with _TTS_LOCK:
-        if _TTS_HANDLER is not None:
-            return _TTS_HANDLER
-        from queue import Queue
-        from threading import Event as ThreadEvent
-
-        from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
-
-        model_dir = os.environ.get("QWEN3_TTS_DIR") or str(QWEN3_TTS_DEFAULT)
-        vdir = _voice_dir()
-        ref_audio = vdir / "ref_audio.wav"
-        ref_text = ""
-        if (vdir / "ref_text.txt").is_file():
-            ref_text = (vdir / "ref_text.txt").read_text(encoding="utf-8").strip()
-        cfg = {
-            "model_name": model_dir,
-            "device": "cuda",
-            "dtype": "auto",
-            "attn_implementation": "eager",
-            "language": "zh",
-            "non_streaming_mode": False,  # 流式产出，边合成边播放
-            "max_new_tokens": 1536,
-            "blocksize": 512,
-            "ref_audio": str(ref_audio),
-            "ref_text": ref_text,
-        }
-        if not ref_audio.is_file():
-            raise RuntimeError(
-                f"音色参考音频不存在: {ref_audio}（可用 DSH_VOICE_DIR 指定音色目录）"
-            )
-        print(f"[record-sink] TTS 加载模型: {model_dir} voice={vdir}", flush=True)
-        _TTS_HANDLER = Qwen3TTSHandler(
-            ThreadEvent(),
-            queue_in=Queue(),
-            queue_out=Queue(),
-            setup_args=(ThreadEvent(),),  # should_listen
-            setup_kwargs=cfg,
-        )
-    return _TTS_HANDLER
-
-
-def _synthesize_text(handler, text: str) -> bytes:
-    """一段中文文本 -> 16k 单声道 PCM16 WAV。"""
-    from speech_to_speech.pipeline.messages import TTSInput
-
-    chunks = []
-    for chunk in handler.process(TTSInput(text=text, language_code="zh")):
-        if isinstance(chunk, bytes):
-            chunks.append(np.frombuffer(chunk, dtype=np.int16))
-        else:
-            chunks.append(np.asarray(chunk, dtype=np.int16))
-    if not chunks:
-        raise RuntimeError("TTS 未产出音频")
-    samples = np.concatenate(chunks).astype(np.int16, copy=False)
-
-    import io
-    import wave
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(samples.tobytes())
-    return buf.getvalue()
 
 
 def _split_speech(text: str, max_len: int = 280, min_pause: int = 40) -> list:
@@ -604,7 +524,9 @@ def _resolve_ffplay() -> Path:
     env = os.environ.get("FFPLAY_BIN")
     if env and Path(env).is_file():
         return Path(env)
-    return FFPLAY_DEFAULT
+    if FFPLAY_DEFAULT.is_file():
+        return FFPLAY_DEFAULT
+    return Path(shutil.which("ffplay")) if shutil.which("ffplay") else FFPLAY_DEFAULT
 
 
 def _ensure_speech_worker() -> None:
@@ -669,29 +591,6 @@ def speech_status() -> dict:
             "queue": _SPEECH_STATE["queue"],
             "error": _SPEECH_ERROR,
         }
-
-
-@app.post("/api/tts")
-async def tts(request: Request) -> Response:
-    """文字转语音：{ text } -> 16k PCM16 WAV（单段 ≤400 字，供测试/前端自播）。"""
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
-    text = text[:TTS_CHUNK_MAX]
-
-    def _run() -> bytes:
-        handler = _load_tts_handler()
-        return _synthesize_text(handler, text)
-
-    try:
-        wav = await asyncio.to_thread(_run)
-    except Exception as err:  # noqa: BLE001
-        return JSONResponse({"ok": False, "error": f"tts failed: {err}"}, status_code=500)
-    return Response(content=wav, media_type="audio/wav")
 
 
 def main() -> None:
