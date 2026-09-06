@@ -1,301 +1,212 @@
 /**
- * VoicePanel — 语音通话面板（conversation.input.dock）。
+ * VoicePanel V1 — DSH 右侧栏录音面板（conversation.input.dock 槽位）。
  *
- * PTT 交互：按住 🎙️ 说话 → 松开 → 自动转文字填入输入框（可改后回车发送）。
- * 另含：🔊 朗读开关 / ⚡ 插话-排队 / 🎚️ 音色热切换 / 桥接状态与朗读指示。
- * 按住所遇正在朗读的回复立即打断（interruptReply）。
+ * 交互：点击 🎙️ 开始录音（MediaRecorder，webm/opus）→ 再次点击停止，
+ * 把整段音频上传到本机 record-sink（默认 http://127.0.0.1:8766，可用
+ * localStorage `s2s.record.base` 覆盖），由它用 ffmpeg 转成 MP3，
+ * 以结束那一秒的年月日时分秒命名存到 D:\dsh_workspeace\vocal\master。
+ *
+ * 后续版本将对最新一条录音做识别 —— 文件名即时间，天然有序。
+ * 面板内置活动日志（最近 20 条），没有控制台也能看到每一步结果。
  */
-import { memo, useEffect, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
-import { health, setVoice, stt, voiceList } from './bridge.ts'
+import { memo, useRef, useState } from 'react'
 import type { VoiceInjected } from './contract.ts'
-import { MicRecorder } from './voice/recorder.ts'
+import { PttRecorder } from './voice/ptt-recorder.ts'
 import styles from './VoiceSidebar.module.css'
 
-const VOICE_ENABLED_KEY = 's2s.voice.enabled'
-const INTERRUPT_KEY = 's2s.voice.interrupt'
-const VOICE_NAME_KEY = 's2s.voice.persona'
-const PANEL_KEY = 's2s.voice.panel'
+const RECORD_SINK_KEY = 's2s.record.base'
+const DEFAULT_SINK = 'http://127.0.0.1:8766'
+const PANEL_KEY = 's2s.record.panel'
+/** 录音时长小于该值视为误触，丢弃。 */
+const MIN_MS = 300
 
-type MicState = 'off' | 'recording' | 'busy'
-
-function readFlag(key: string, fallback: boolean): boolean {
+function sinkBase(): string {
   try {
-    const raw = localStorage.getItem(key)
-    if (raw === null) return fallback
-    return raw !== '0'
-  } catch {
-    return fallback
-  }
+    const v = localStorage.getItem(RECORD_SINK_KEY)
+    if (v !== null && v.trim() !== '') return v.trim().replace(/\/+$/, '')
+  } catch { /* ignore */ }
+  return DEFAULT_SINK
 }
 
-function writeFlag(key: string, value: boolean): void {
-  try {
-    localStorage.setItem(key, value ? '1' : '0')
-  } catch {
-    // persistence unavailable
-  }
+function clock(): string {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+type Phase = 'idle' | 'recording' | 'saving' | 'error'
+
+interface LogLine {
+  t: string
+  msg: string
+  bad?: boolean
 }
 
 export type VoiceSidebarProps = VoiceInjected
 
 /**
- * @param props - injected face (fillComposer/sendText/speaker/interrupt wiring).
+ * @param _props - V1 无注入 face，保留参数以匹配槽位渲染契约。
  */
-export const VoiceSidebar = memo(function VoiceSidebar(props: VoiceInjected) {
-  const { speaker } = props
-
-  const [mic, setMic] = useState<MicState>('off')
-  const [reading, setReading] = useState(false)
-  const [voiceOn, setVoiceOn] = useState<boolean>(() => readFlag(VOICE_ENABLED_KEY, true))
-  const [interrupt, setInterrupt] = useState<boolean>(() => readFlag(INTERRUPT_KEY, true))
-  const [collapsed, setCollapsed] = useState<boolean>(() => readFlag(PANEL_KEY, false))
-  const [bridge, setBridge] = useState<{ online: boolean; stt: boolean; tts: boolean; voice: string }>({
-    online: false,
-    stt: false,
-    tts: false,
-    voice: '',
+export const VoiceSidebar = memo(function VoiceSidebar(_props: VoiceInjected) {
+  const [phase, setPhase] = useState<Phase>('idle')
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PANEL_KEY) === '1'
+    } catch {
+      return false
+    }
   })
-  const [voices, setVoices] = useState<{ name: string; label: string }[]>([])
-  const [currentVoice, setCurrentVoice] = useState('')
-  const [lastText, setLastText] = useState('')
+  const [log, setLog] = useState<LogLine[]>(() => [
+    { t: clock(), msg: '就绪：点 🎙️ 开始录音，再点一次结束并保存 MP3' },
+  ])
 
-  const recorderRef = useRef<MicRecorder | null>(null)
-  const pressingRef = useRef(false)
-  const busyRef = useRef(false)
-  const voiceRestoredRef = useRef(false)
+  const recorderRef = useRef<PttRecorder | null>(null)
+  const savingRef = useRef(false)
 
-  // ── speaker 朗读状态（订阅一次）───────────────────────────────────────────
-  useEffect(() => {
-    const unsub = speaker.subscribe(() => setReading(speaker.speaking))
-    return unsub
-  }, [speaker])
-
-  // ── 桥接健康与音色清单轮询 ────────────────────────────────────────────────
-  useEffect(() => {
-    let alive = true
-    const tick = async () => {
-      const h = await health()
-      if (!alive) return
-      if (h === null) {
-        setBridge({ online: false, stt: false, tts: false, voice: '' })
-        return
-      }
-      setBridge({ online: h.status === 'ok', stt: h.stt === true, tts: h.tts === true, voice: h.voice ?? '' })
-      if (Array.isArray(h.voices) && h.voices.length > 0) {
-        setVoices(prev => {
-          const next = h.voices!.map(name => ({ name, label: name }))
-          const same = prev.length === next.length && prev.every((v, i) => v.name === next[i]!.name)
-          return same ? prev : next
-        })
-        setCurrentVoice(prev => prev || h.voice || '')
-      }
-    }
-    void tick()
-    const id = setInterval(tick, 5000)
-    return () => {
-      alive = false
-      clearInterval(id)
-    }
-  }, [])
-
-  // ── 音色热切换 + 启动时恢复上次选择 ────────────────────────────────────────
-  useEffect(() => {
-    if (voices.length === 0 || voiceRestoredRef.current) return
-    voiceRestoredRef.current = true
-    let stored = ''
-    try {
-      stored = localStorage.getItem(VOICE_NAME_KEY) ?? ''
-    } catch { /* ignore */ }
-    if (stored && voices.some(v => v.name === stored) && stored !== bridge.voice) {
-      void setVoice(stored).then(ok => { if (ok) setCurrentVoice(stored) })
-    }
-    void voiceList().then(list => {
-      if (list !== null && list.voices.length > 0) {
-        setVoices(list.voices.map(v => ({ name: v.name, label: v.label })))
-        setCurrentVoice(list.current.voice)
-      }
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voices])
-
-  const handleVoiceChange = (name: string): void => {
-    setCurrentVoice(name)
-    try {
-      localStorage.setItem(VOICE_NAME_KEY, name)
-    } catch { /* ignore */ }
-    void setVoice(name)
+  const pushLog = (msg: string, bad = false): void => {
+    setLog(prev => [...prev.slice(-19), { t: clock(), msg, bad }])
   }
 
-  // ── PTT：按住录音 → 松开转文字 → 填输入框 ────────────────────────────────
-  const runTranscribe = async (pcm: ArrayBuffer): Promise<void> => {
-    if (busyRef.current) return
-    busyRef.current = true
-    setMic('busy')
+  const saveRecording = async (blob: Blob, ms: number): Promise<void> => {
+    if (savingRef.current) return
+    if (ms < MIN_MS) {
+      pushLog(`录音太短（${ms}ms），已丢弃`)
+      setPhase('idle')
+      return
+    }
+    savingRef.current = true
+    setPhase('saving')
     try {
-      const result = await stt(pcm)
-      const text = (result.text || '').trim()
-      if (text) {
-        setLastText(text)
-        props.fillComposer(text)
-      } else {
-        setLastText('')
+      const res = await fetch(`${sinkBase()}/api/record`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': blob.type || 'audio/webm',
+          'X-Record-Ms': String(ms),
+        },
+        body: blob,
+      })
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean
+        file?: string
+        seconds?: number
+        bytes?: number
+        error?: string
+      } | null
+      if (!res.ok || data === null || data.ok !== true) {
+        throw new Error(data?.error ?? `HTTP ${res.status}`)
       }
+      const seconds = typeof data.seconds === 'number' ? data.seconds.toFixed(1) : '?'
+      const kb = typeof data.bytes === 'number' ? Math.round(data.bytes / 1024) : '?'
+      pushLog(`已保存 → ${data.file}（${seconds}s / ${kb}KB）`)
     } catch (err) {
-      console.error('[ui-voice-call] stt failed:', err)
-      setLastText('')
+      const msg = err instanceof Error ? err.message : String(err)
+      pushLog(`保存失败：${msg}`, true)
+      setPhase('error')
     } finally {
-      busyRef.current = false
-      setMic('off')
+      savingRef.current = false
+      setPhase('idle')
     }
   }
 
-  const pressStart = async (e: ReactPointerEvent<HTMLButtonElement>): Promise<void> => {
-    e.preventDefault()
-    if (pressingRef.current || busyRef.current) return
+  const startRecording = async (): Promise<void> => {
+    if (phase === 'recording' || phase === 'saving') return
+    setPhase('recording')
+    pushLog('开始录音…（再点一次结束并保存）')
     try {
-      // 按住即打断当前朗读并吞掉本回复剩余句子
-      props.interruptReply()
-      const recorder = new MicRecorder({
-        ptt: true,
-        noiseGateDb: -35,
-        onUtterance: (pcm) => {
-          void runTranscribe(pcm)
+      const recorder = new PttRecorder({
+        onDone: (blob, ms) => {
+          void saveRecording(blob, ms)
         },
       })
       recorderRef.current = recorder
-      pressingRef.current = true
-      setMic('recording')
       await recorder.start()
     } catch (err) {
-      console.error('[ui-voice-call] mic start failed:', err)
-      pressingRef.current = false
       recorderRef.current = null
-      setMic('off')
+      setPhase('error')
+      pushLog(`麦克风启动失败：${err instanceof Error ? err.message : String(err)}`, true)
     }
   }
 
-  const pressEnd = (): void => {
-    if (!pressingRef.current) return
-    pressingRef.current = false
+  const stopRecording = (): void => {
     const recorder = recorderRef.current
     recorderRef.current = null
-    if (recorder !== null) recorder.stop() // stop 会把整段按住音频作为一句 flush 给 onUtterance
-  }
-
-  const toggleVoiceOn = (): void => {
-    const next = !voiceOn
-    setVoiceOn(next)
-    writeFlag(VOICE_ENABLED_KEY, next)
-    if (!next) {
-      props.abortTts()
-      speaker.stop()
+    if (recorder !== null) {
+      recorder.stop()
+    } else {
+      setPhase('idle')
     }
   }
 
-  const toggleInterrupt = (): void => {
-    const next = !interrupt
-    setInterrupt(next)
-    writeFlag(INTERRUPT_KEY, next)
+  const onMicClick = (): void => {
+    if (phase === 'saving') return
+    if (phase === 'recording') {
+      stopRecording()
+    } else {
+      void startRecording()
+    }
   }
 
   const toggleCollapsed = (): void => {
     const next = !collapsed
     setCollapsed(next)
-    writeFlag(PANEL_KEY, next)
+    try {
+      localStorage.setItem(PANEL_KEY, next ? '1' : '0')
+    } catch { /* ignore */ }
   }
 
   if (collapsed) {
     return (
-      <button
-        type="button"
-        className={styles.rail}
-        title="语音通话面板"
-        onClick={toggleCollapsed}
-      >
+      <button type="button" className={styles.rail} title="语音录音面板" onClick={toggleCollapsed}>
         🎙️
       </button>
     )
   }
 
-  const recording = mic === 'recording'
-  const busy = mic === 'busy'
+  const recording = phase === 'recording'
+  const saving = phase === 'saving'
+  const micClass = recording
+    ? `${styles.micBtn} ${styles.micOn}`
+    : saving
+      ? `${styles.micBtn} ${styles.micBusy}`
+      : styles.micBtn
+
+  const statusText = saving
+    ? '保存中…'
+    : recording
+      ? '正在录音，点按钮结束并保存'
+      : phase === 'error'
+        ? '出错了，见下方日志'
+        : '点开始录音（再点一次结束）'
 
   return (
     <div className={styles.root}>
       <button type="button" className={styles.collapse} onClick={toggleCollapsed} title="收起">»</button>
       <header className={styles.header}>
-        <span className={styles.title}>语音通话</span>
-        <span className={styles.subtitle}>按住说话 · 松开识别填入输入框</span>
+        <span className={styles.title}>录音面板</span>
+        <span className={styles.subtitle}>V1 · 录音存 MP3</span>
       </header>
 
-      {/* PTT 大按钮 */}
       <div className={styles.micArea}>
         <button
           type="button"
-          className={busy ? `${styles.micBtn} ${styles.micBusy}` : recording ? `${styles.micBtn} ${styles.micOn}` : styles.micBtn}
-          title={recording ? '松开结束录音' : '按住说话'}
-          disabled={busy}
-          onPointerDown={(e) => void pressStart(e)}
-          onPointerUp={pressEnd}
-          onPointerLeave={() => { if (pressingRef.current) pressEnd() }}
-          onPointerCancel={pressEnd}
-          onContextMenu={(e) => e.preventDefault()}
+          className={micClass}
+          title={recording ? '结束录音并保存' : '开始录音'}
+          disabled={saving}
+          onClick={onMicClick}
         >
-          {busy ? '⏳' : recording ? '🔴' : '🎙️'}
+          {saving ? '⏳' : recording ? '🔴' : '🎙️'}
         </button>
-        <span className={styles.stateText}>
-          {busy ? '识别中…' : recording ? '正在听，松开结束' : reading ? '正在朗读回复…（按住可打断）' : '按住说话'}
+        <span className={recording ? `${styles.stateText} ${styles.stateRec}` : styles.stateText}>
+          {statusText}
         </span>
-        {lastText !== '' && <span className={styles.lastText}>已填入输入框：“{lastText}”</span>}
       </div>
 
-      {/* 模式开关 */}
-      <div className={styles.controls}>
-        <button
-          type="button"
-          className={voiceOn ? `${styles.toggle} ${styles.toggleOn}` : styles.toggle}
-          onClick={toggleVoiceOn}
-          title={voiceOn ? '关闭语音朗读' : '开启语音朗读'}
-        >
-          🔊 {voiceOn ? '朗读开' : '朗读关'}
-        </button>
-        <button
-          type="button"
-          className={interrupt ? `${styles.toggle} ${styles.toggleOn}` : styles.toggle}
-          onClick={toggleInterrupt}
-          title={interrupt ? '插话模式：说话打断当前回复并立即发送' : '排队模式：当前回复读完后再自动接上'}
-        >
-          ⚡ {interrupt ? '插话' : '排队'}
-        </button>
-      </div>
-
-      {/* 音色切换 */}
-      <label className={styles.voiceRow}>
-        <span>🎚️ 音色</span>
-        <select
-          className={styles.select}
-          value={currentVoice}
-          onChange={e => handleVoiceChange(e.target.value)}
-          disabled={voices.length === 0}
-        >
-          {voices.length === 0 && <option value="">（无音色，见 voices/ 说明）</option>}
-          {voices.map(v => (
-            <option key={v.name} value={v.name}>{v.label}</option>
-          ))}
-        </select>
-      </label>
-
-      {/* 状态 */}
       <footer className={styles.footer}>
-        <div className={bridge.online ? `${styles.statusLine} ${styles.ok}` : styles.statusLine}>
-          <span className={styles.dot} />
-          {bridge.online ? '桥接正常' : '桥接未连接'}
-        </div>
-        <div className={styles.meta}>
-          {bridge.stt ? 'ASR 就绪' : 'ASR 未加载'}
-          <span className={styles.sep}>·</span>
-          {bridge.tts ? 'TTS 就绪' : 'TTS 未加载'}
+        <div className={styles.hint}>保存位置：D:\dsh_workspeace\vocal\master（文件名 = 结束时刻）</div>
+        <div className={styles.logBox}>
+          {log.map((item, i) => (
+            <div key={i} className={item.bad === true ? `${styles.logLine} ${styles.logBad}` : styles.logLine}>
+              <span className={styles.logT}>{item.t}</span> {item.msg}
+            </div>
+          ))}
         </div>
       </footer>
     </div>

@@ -1,38 +1,10 @@
 /**
- * ui-voice-call slot contract: the injected face the plugin `apply` provides
- * to the conversation-seat components. Everything the panel needs is session
- * bound: recognized text can be filled into the composer draft (setDraft via
- * the session-scope conversation input facade), plus the shared
- * playback/abort/interrupt wiring.
+ * ui-voice-call V1 slot contract.
+ *
+ * V1 只做「按住录音 → MP3 落盘到本机 vocal/master」，不依赖任何会话服务，
+ * 因此注入 face 为空。后续版本（语音转文字填入输入框 / 克隆音色朗读 / 打断）
+ * 再在 VoiceInjected 上扩展会话绑定能力。
  */
-
-import type { ReplySpeaker } from './voice/speaker.ts'
-
-/** Injected behavior face the voice components receive from the plugin apply. */
 export interface VoiceInjected {
-  /**
-   * Fill the composer input of the bound session with `text` (the user then
-   * reviews and presses Enter). No-op when the session's conversation input
-   * facade is unavailable (logged to the on-screen voice log).
-   */
-  fillComposer: (text: string) => void
-  /**
-   * Send a recognized utterance into the current session as a user prompt
-   * (fallback / quick-send). Rejects when no session scope is available.
-   * @param text - recognized utterance text.
-   */
-  sendText: (text: string) => Promise<void>
-  /** Plays synthesized reply audio; one shared instance per plugin fiber. */
-  speaker: ReplySpeaker
-  /** Abort any TTS request currently in flight (turning voice off / barge-in). */
-  abortTts: () => void
-  /**
-   * Mic barge-in: stop playback, abort the in-flight TTS request, and ask the
-   * reply listener to swallow the rest of the current reply.
-   */
-  interruptReply: () => void
-  /** Internal wiring (plugin-private): register the current TTS AbortController. */
-  _registerTtsAbort: (controller: AbortController | null) => void
-  /** Internal wiring (plugin-private): register the barge-in swallow handler. */
-  _registerInterruptHandler: (handler: (() => void) | null) => void
+  // V1: 无注入能力。保留空接口以便后续版本在不动槽位契约的情况下扩展。
 }
