@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import subprocess
 import threading
 import time
@@ -38,7 +39,7 @@ from typing import Optional
 import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 # 若 ffmpeg 不在 PATH，且未设置 FFMPEG_BIN，则回退到这个默认路径（可自行修改）。
 FFMPEG_FALLBACKS = [
@@ -113,6 +114,7 @@ def health() -> dict:
         "out_dir": str(OUT_DIR),
         "ffmpeg": "ok" if FFMPEG else "missing",
         "stt": "ready" if _STT_MODEL is not None else "cold",
+        "tts": "ready" if _TTS_HANDLER is not None else "cold",
     }
 
 
@@ -149,6 +151,37 @@ def unique_path(d: Path, stem: str, ext: str) -> Path:
         if not cand.exists():
             return cand
         i += 1
+
+
+def answer_dir() -> Path:
+    """回答 txt 落盘目录：环境 DSH_ANSWER_DIR，否则 OUT_DIR 的兄弟 answer/。"""
+    env = os.environ.get("DSH_ANSWER_DIR")
+    if env:
+        return Path(env)
+    return OUT_DIR.parent / "answer"
+
+
+@app.post("/api/answer")
+async def save_answer(request: Request) -> JSONResponse:
+    """保存一次正式回答：{ text } -> vocal/answer/YYYYMMDDHHMMSS.txt（结束时刻命名）。"""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    out_dir = answer_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    out = unique_path(out_dir, stamp, ".txt")
+    out.write_text(text, encoding="utf-8")
+    return JSONResponse({
+        "ok": True,
+        "file": out.name,
+        "path": str(out),
+        "bytes": out.stat().st_size,
+    })
 
 
 @app.post("/api/record")
@@ -324,6 +357,335 @@ async def stt(request: Request) -> JSONResponse:
         return JSONResponse(result)
     except Exception as err:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": f"stt failed: {err}"}, status_code=500)
+
+
+# ──────────────────────────── 克隆朗读 + 服务端播放 (V3) ───────────────────────
+import queue as _queue
+import tempfile as _tempfile
+
+QWEN3_TTS_DEFAULT = Path(r"D:\models\Qwen3-TTS-12Hz-1.7B-Base")
+VOICE_DIR_DEFAULT = Path(__file__).resolve().parents[1] / "voices" / "我的声音"
+FFPLAY_DEFAULT = Path(r"D:\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffplay.exe")
+# 单段合成字数上限（服务端再按句切小段，串行合成+播放）。
+TTS_CHUNK_MAX = 400
+
+_TTS_HANDLER = None
+_TTS_LOCK = threading.Lock()
+
+_SPEECH_QUEUE = _queue.Queue()
+_SPEECH_THREAD = None
+_SPEECH_THREAD_LOCK = threading.Lock()
+_SPEECH_STOP = threading.Event()
+_SPEECH_CURRENT = None  # 当前正在播放的 ffplay Popen
+_SPEECH_STATE_LOCK = threading.Lock()
+_SPEECH_STATE = {"speaking": False, "queue": 0}
+_SPEECH_ERROR = ""
+
+
+def _voice_dir() -> Path:
+    env = os.environ.get("DSH_VOICE_DIR")
+    return Path(env) if env else VOICE_DIR_DEFAULT
+
+
+def _load_tts_handler():
+    """懒加载 Qwen3TTSHandler（克隆音色；参考音频/文本在加载时读入）。"""
+    global _TTS_HANDLER  # noqa: PLW0603
+    if _TTS_HANDLER is not None:
+        return _TTS_HANDLER
+    with _TTS_LOCK:
+        if _TTS_HANDLER is not None:
+            return _TTS_HANDLER
+        from queue import Queue
+        from threading import Event as ThreadEvent
+
+        from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+
+        model_dir = os.environ.get("QWEN3_TTS_DIR") or str(QWEN3_TTS_DEFAULT)
+        vdir = _voice_dir()
+        ref_audio = vdir / "ref_audio.wav"
+        ref_text = ""
+        if (vdir / "ref_text.txt").is_file():
+            ref_text = (vdir / "ref_text.txt").read_text(encoding="utf-8").strip()
+        cfg = {
+            "model_name": model_dir,
+            "device": "cuda",
+            "dtype": "auto",
+            "attn_implementation": "eager",
+            "language": "zh",
+            "non_streaming_mode": False,  # 流式产出，边合成边播放
+            "max_new_tokens": 1536,
+            "blocksize": 512,
+            "ref_audio": str(ref_audio),
+            "ref_text": ref_text,
+        }
+        if not ref_audio.is_file():
+            raise RuntimeError(
+                f"音色参考音频不存在: {ref_audio}（可用 DSH_VOICE_DIR 指定音色目录）"
+            )
+        print(f"[record-sink] TTS 加载模型: {model_dir} voice={vdir}", flush=True)
+        _TTS_HANDLER = Qwen3TTSHandler(
+            ThreadEvent(),
+            queue_in=Queue(),
+            queue_out=Queue(),
+            setup_args=(ThreadEvent(),),  # should_listen
+            setup_kwargs=cfg,
+        )
+    return _TTS_HANDLER
+
+
+def _synthesize_text(handler, text: str) -> bytes:
+    """一段中文文本 -> 16k 单声道 PCM16 WAV。"""
+    from speech_to_speech.pipeline.messages import TTSInput
+
+    chunks = []
+    for chunk in handler.process(TTSInput(text=text, language_code="zh")):
+        if isinstance(chunk, bytes):
+            chunks.append(np.frombuffer(chunk, dtype=np.int16))
+        else:
+            chunks.append(np.asarray(chunk, dtype=np.int16))
+    if not chunks:
+        raise RuntimeError("TTS 未产出音频")
+    samples = np.concatenate(chunks).astype(np.int16, copy=False)
+
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(samples.tobytes())
+    return buf.getvalue()
+
+
+def _split_speech(text: str, max_len: int = 280, min_pause: int = 40) -> list:
+    """攒句成段：句子到 min_pause 字以上或到 max_len 才切（减少句间合成停顿）。"""
+    out = []
+    buf = ""
+    for ch in text:
+        buf += ch
+        if len(buf) >= max_len or (len(buf) >= min_pause and ch in "。！？!?…；;\n"):
+            out.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        out.append(buf.strip())
+    return out
+
+
+# 会令 GBK 输出/合成失败的 emoji、装饰符号等。
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF"
+    "\U00002600-\U000027BF\U0000FE00-\U0000FE0F"
+    "\U0000200D\u20E3]"
+)
+
+
+def _sanitize_tts_text(text: str) -> str:
+    """去掉不适合朗读/导致编码失败的内容（emoji、控制符等）。"""
+    s = _EMOJI_RE.sub("", text)
+    s = re.sub(r"[\uE000-\uF8FF\uFFF0-\uFFFF]", "", s)  # 私用区/占位
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _piper_paths():
+    """开源离线 Piper(内置)：返回 (exe, model, config) 或 None。"""
+    root = Path(__file__).resolve().parent / "piper"
+    exe = root / "bin" / "piper.exe"
+    model = root / "voices" / "zh_CN-huayan-medium.onnx"
+    cfg = root / "voices" / "zh_CN-huayan-medium.onnx.json"
+    if exe.is_file() and model.is_file() and cfg.is_file():
+        return exe, model, cfg
+    return None
+
+
+def _speak_sapi_piece(text: str) -> None:
+    """系统 SAPI 兜底（默认语音）。"""
+    engine = Path(__file__).resolve().parent / "speak.ps1"
+    proc = subprocess.Popen(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(engine), "-Text", text,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    with _SPEECH_STATE_LOCK:
+        _SPEECH_CURRENT = proc
+    try:
+        proc.wait(timeout=900)
+    finally:
+        with _SPEECH_STATE_LOCK:
+            if _SPEECH_CURRENT is proc:
+                _SPEECH_CURRENT = None
+
+
+def _speak_piper_piece(exe: Path, model: Path, cfg: Path, text: str) -> None:
+    """Piper(huayan) 合成一段 -> 临时 wav -> ffplay 播放。"""
+    fd, path = _tempfile.mkstemp(suffix=".wav", prefix="dsh_piper_")
+    os.close(fd)
+    try:
+        synth = subprocess.Popen(
+            [str(exe), "-m", str(model), "-c", str(cfg), "--output_file", str(path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        with _SPEECH_STATE_LOCK:
+            _SPEECH_CURRENT = synth
+        try:
+            assert synth.stdin is not None
+            synth.stdin.write(text.encode("utf-8"))
+            synth.stdin.close()
+            synth.wait(timeout=900)
+        finally:
+            with _SPEECH_STATE_LOCK:
+                if _SPEECH_CURRENT is synth:
+                    _SPEECH_CURRENT = None
+        if synth.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 1000:
+            play = subprocess.Popen(
+                [str(_resolve_ffplay()), "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with _SPEECH_STATE_LOCK:
+                _SPEECH_CURRENT = play
+            try:
+                play.wait(timeout=900)
+            finally:
+                with _SPEECH_STATE_LOCK:
+                    if _SPEECH_CURRENT is play:
+                        _SPEECH_CURRENT = None
+        else:
+            raise RuntimeError(f"piper 合成失败 rc={synth.returncode}")
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _speech_worker() -> None:
+    global _SPEECH_CURRENT, _SPEECH_ERROR  # noqa: PLW0603
+    while True:
+        text = _SPEECH_QUEUE.get()
+        if text is None:
+            return
+        with _SPEECH_STATE_LOCK:
+            _SPEECH_STATE["speaking"] = True
+            _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
+        try:
+            piper = _piper_paths()
+            for piece in _split_speech(text, max_len=280, min_pause=50):
+                if _SPEECH_STOP.is_set():
+                    break
+                if piper is not None:
+                    _speak_piper_piece(*piper, text=piece)
+                else:
+                    _speak_sapi_piece(piece)
+        except Exception as err:  # noqa: BLE001
+            print(f"[record-sink] speak error: {err}", flush=True)
+            with _SPEECH_STATE_LOCK:
+                _SPEECH_ERROR = str(err)
+        finally:
+            with _SPEECH_STATE_LOCK:
+                _SPEECH_STATE["speaking"] = False
+                _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
+
+
+def _resolve_ffplay() -> Path:
+    env = os.environ.get("FFPLAY_BIN")
+    if env and Path(env).is_file():
+        return Path(env)
+    return FFPLAY_DEFAULT
+
+
+def _ensure_speech_worker() -> None:
+    global _SPEECH_THREAD  # noqa: PLW0603
+    with _SPEECH_THREAD_LOCK:
+        if _SPEECH_THREAD is None or not _SPEECH_THREAD.is_alive():
+            _SPEECH_THREAD = threading.Thread(target=_speech_worker, daemon=True)
+            _SPEECH_THREAD.start()
+
+
+@app.post("/api/speak")
+async def speak(request: Request) -> JSONResponse:
+    """整段文本入队朗读（克隆音色，服务端 ffplay 出声，串行）。"""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+    text = _sanitize_tts_text(str(payload.get("text") or ""))
+    if not text:
+        return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    if not _resolve_ffplay().is_file():
+        return JSONResponse({"ok": False, "error": f"ffplay 不存在: {_resolve_ffplay()}"}, status_code=500)
+    try:
+        _ensure_speech_worker()
+        with _SPEECH_STATE_LOCK:
+            _SPEECH_ERROR = ""
+        _SPEECH_STOP.clear()
+        _SPEECH_QUEUE.put(text)
+        with _SPEECH_STATE_LOCK:
+            queue_len = _SPEECH_QUEUE.qsize() + (1 if _SPEECH_STATE["speaking"] else 0)
+        return JSONResponse({"ok": True, "queue": queue_len, "chars": len(text)})
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"speak failed: {err}"}, status_code=500)
+
+
+@app.post("/api/speech/stop")
+async def speech_stop() -> JSONResponse:
+    """停掉当前播放并清空队列。"""
+    global _SPEECH_CURRENT  # noqa: PLW0603
+    _SPEECH_STOP.set()
+    with _SPEECH_STATE_LOCK:
+        proc = _SPEECH_CURRENT
+        _SPEECH_CURRENT = None
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    while True:
+        try:
+            _SPEECH_QUEUE.get_nowait()
+        except _queue.Empty:
+            break
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/speech/status")
+def speech_status() -> dict:
+    with _SPEECH_STATE_LOCK:
+        return {
+            "speaking": _SPEECH_STATE["speaking"],
+            "queue": _SPEECH_STATE["queue"],
+            "error": _SPEECH_ERROR,
+        }
+
+
+@app.post("/api/tts")
+async def tts(request: Request) -> Response:
+    """文字转语音：{ text } -> 16k PCM16 WAV（单段 ≤400 字，供测试/前端自播）。"""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    text = text[:TTS_CHUNK_MAX]
+
+    def _run() -> bytes:
+        handler = _load_tts_handler()
+        return _synthesize_text(handler, text)
+
+    try:
+        wav = await asyncio.to_thread(_run)
+    except Exception as err:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"tts failed: {err}"}, status_code=500)
+    return Response(content=wav, media_type="audio/wav")
 
 
 def main() -> None:

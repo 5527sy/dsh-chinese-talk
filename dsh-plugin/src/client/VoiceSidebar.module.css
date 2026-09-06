@@ -156,6 +156,39 @@
   margin-right: 4px;
 }
 
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ctrlBtn {
+  border: 1px solid var(--color-border, rgba(127, 127, 127, 0.35));
+  background: var(--color-bg-2, rgba(127, 127, 127, 0.1));
+  color: var(--color-text-1, #333);
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.15s ease;
+}
+.ctrlBtn:hover {
+  background: var(--color-bg-3, rgba(127, 127, 127, 0.2));
+}
+.ctrlOn {
+  border-color: rgba(79, 110, 247, 0.7);
+  background: rgba(79, 110, 247, 0.16);
+}
+
+.speaking {
+  font-size: 12px;
+  color: #2e7d32;
+  font-weight: 600;
+}
+
 /* 弹窗提示（如“哎呀，录音太短了”） */
 .toast {
   position: absolute;

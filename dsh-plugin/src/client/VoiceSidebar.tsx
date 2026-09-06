@@ -13,6 +13,8 @@
  */
 import { memo, useEffect, useRef, useState } from 'react'
 import { insertRecognizedText } from './voice/input-target.ts'
+import { bindLog } from './voice/log-bus.ts'
+import { reader } from './voice/read-aloud.ts'
 import { PttRecorder } from './voice/ptt-recorder.ts'
 import styles from './VoiceSidebar.module.css'
 
@@ -67,6 +69,8 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
     { t: clock(), msg: '就绪：先点要填的输入框，再 🎙️ 录音；文字自动填入' },
   ])
   const [toast, setToast] = useState<string | null>(null)
+  const [readOn, setReadOn] = useState<boolean>(reader.enabled)
+  const [speaking, setSpeaking] = useState<boolean>(reader.reading)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const recorderRef = useRef<PttRecorder | null>(null)
@@ -80,6 +84,20 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
     return () => {
       if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current)
     }
+  }, [])
+
+  // 全局日志总线 + 朗读器状态镜像。
+  useEffect(() => {
+    const unsubReader = reader.subscribe(() => {
+      setReadOn(reader.enabled)
+      setSpeaking(reader.reading)
+    })
+    bindLog((msg, bad = false) => pushLog(msg, bad))
+    return () => {
+      unsubReader()
+      bindLog(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const showToast = (msg: string, durationMs = 2600): void => {
@@ -174,6 +192,8 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
 
   const startRecording = async (): Promise<void> => {
     if (phase === 'recording' || phase === 'saving' || phase === 'recognizing') return
+    // 要开口问了：先停掉正在朗读的回复。
+    void reader.stop()
     setPhase('recording')
     pushLog('开始录音…（再点一次结束）')
     try {
@@ -271,6 +291,18 @@ export const VoiceSidebar = memo(function VoiceSidebar() {
             <span className={recording ? `${styles.stateText} ${styles.stateRec}` : styles.stateText}>
               {statusText}
             </span>
+          </div>
+
+          <div className={styles.controls}>
+            <button
+              type="button"
+              className={readOn ? `${styles.ctrlBtn} ${styles.ctrlOn}` : styles.ctrlBtn}
+              title={readOn ? '关闭自动朗读回答' : '开启自动朗读回答'}
+              onClick={() => reader.setEnabled(!readOn)}
+            >
+              {readOn ? '🔊 朗读开' : '🔇 朗读关'}
+            </button>
+            {speaking && <span className={styles.speaking}>📢 朗读中…</span>}
           </div>
 
           <footer className={styles.footer}>
