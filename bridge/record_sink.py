@@ -2,8 +2,8 @@
 
 浏览器点击开始/结束录音（MediaRecorder，webm/opus）→ 结束后上传音频 →
 本服务用 ffmpeg 转成 MP3，以结束那一秒的年月日时分秒命名（如
-20260212103015.mp3）保存到输出目录（默认 <工作区>/vocal/master，由本文件所在层级
-相对推导，可用 --out-dir 或 DSH_VOCAL_DIR 覆盖）。也接受 WAV（兼容调试）。
+20260212103015.mp3）保存到输出目录（默认 <项目根>/vocal/master，可用
+--out-dir 或 DSH_VOCAL_DIR 覆盖）。也接受 WAV（兼容调试）。
 
 V2.1 起同时提供中文语音识别：
   POST /api/stt  上传任意音频（webm/mp3/wav…）→ ffmpeg 转 16k PCM →
@@ -79,12 +79,12 @@ EXT_BY_TYPE = {
 
 
 def default_out_dir() -> Path:
-    """默认输出 = <工作区>/vocal/master（相对本文件推导，无盘符写死）。
+    """默认输出 = <项目根>/vocal/master（相对 PROJECT_ROOT，无盘符写死）。
 
-    取 __file__ 的 parents[2]（bridge → 项目根 → 工作区），再拼 vocal/master。
-    也可用启动参数 --out-dir 或环境变量 DSH_VOCAL_DIR 覆盖。
+    录音 MP3 存 <项目根>/vocal/master，回答 txt 存 <项目根>/vocal/answer
+    （vocal/ 已在 .gitignore，不会进库）。可用 --out-dir 或 DSH_VOCAL_DIR 覆盖。
     """
-    return Path(__file__).resolve().parents[2] / "vocal" / "master"
+    return PROJECT_ROOT / "vocal" / "master"
 
 
 def resolve_ffmpeg() -> Optional[Path]:

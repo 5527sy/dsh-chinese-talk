@@ -22,6 +22,9 @@ scripts/setup_models.py
 *.mp3
 *.log
 
+# Recorded output (录音/回答) — project-local, never commit
+vocal/
+
 # 内置开源 Piper TTS(程序+音色,体积大,不入库;本地按需保留)
 bridge/piper/
 
