@@ -1,18 +1,20 @@
 /* 录音面板：固定悬浮在最右侧，竖排；右上角小图标做展开/隐藏。 */
 
-/* 右上角常驻切换图标 */
+/* 常驻切换图标：右侧中间（竖排面板的“把手”） */
 .toggle {
   position: fixed;
-  top: 10px;
-  right: 12px;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
   z-index: 300;
-  width: 34px;
-  height: 34px;
+  pointer-events: auto;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   border: 1px solid var(--color-border, rgba(127, 127, 127, 0.35));
-  background: var(--color-bg-2, rgba(127, 127, 127, 0.1));
+  background: var(--color-bg-2, rgba(127, 127, 127, 0.12));
   color: var(--color-text-1, #333);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -25,27 +27,30 @@
   background: var(--color-bg-3, rgba(127, 127, 127, 0.22));
 }
 .toggle:active {
-  transform: scale(0.94);
+  transform: translateY(-50%) scale(0.94);
 }
 
-/* 展开后的面板：贴右缘、竖排 */
+/* 展开后的面板：右侧中间、贴图标左侧竖排，不盖住对话主体 */
 .root {
   position: fixed;
-  top: 54px;
-  right: 12px;
+  top: 50%;
+  right: 48px;
+  transform: translateY(-50%);
   z-index: 299;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: 196px;
-  max-height: calc(100vh - 70px);
+  width: 200px;
+  max-height: calc(100vh - 24px);
   overflow-y: auto;
   box-sizing: border-box;
   padding: 10px 12px;
   border-radius: 10px;
-  background: var(--color-bg-2, rgba(127, 127, 127, 0.09));
+  background: var(--color-bg-2, rgba(127, 127, 127, 0.92));
   border: 1px solid var(--color-border, rgba(127, 127, 127, 0.28));
   font-family: inherit;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
 }
 
 .header {

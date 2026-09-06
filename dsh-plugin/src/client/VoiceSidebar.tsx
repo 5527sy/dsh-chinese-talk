@@ -1,17 +1,18 @@
 /**
- * VoicePanel — DSH 右侧录音面板（conversation.input.dock 槽位挂载，实际悬浮于窗口最右侧）。
+ * VoicePanel — DSH 全壳右侧录音面板（挂 ui-layout `shell.overlay`，常驻不随
+ * 会话状态卸载，思考/回答进行中也一直可用）。
  *
- * 布局：固定贴窗口右缘、竖排；右上角常驻小图标做「展开 / 隐藏」。
+ * 布局：固定贴窗口右缘中间、竖排；右侧中间的 🎙️/✕ 图标做「展开 / 隐藏」。
  * V1：点 🎙️ 开始录音（MediaRecorder，webm/opus）→ 再点结束，上传 record-sink(:8766)
  *     存 MP3（结束时刻命名）。
  * V2：时长 <1s 弹出「哎呀，录音太短了」，不保存。
- * V2.1：保存后自动调 /api/stt 中文识别，文本通过 appendDraft 追加进输入框草稿
- *      （不自动发送；多条自动接着排）。
+ * V2.1：保存后自动调 /api/stt 中文识别，文本通过 draft writer 追加进
+ *       「当前会话」输入框草稿（不自动发送；多条自动接着排，回答中也可用）。
  *
  * 面板内置活动日志（最近 20 条），没有控制台也能看到每一步结果。
  */
 import { memo, useEffect, useRef, useState } from 'react'
-import type { VoiceInjected } from './contract.ts'
+import { insertRecognizedText } from './voice/input-target.ts'
 import { PttRecorder } from './voice/ptt-recorder.ts'
 import styles from './VoiceSidebar.module.css'
 
@@ -55,16 +56,15 @@ interface LogLine {
   bad?: boolean
 }
 
-export type VoiceSidebarProps = VoiceInjected
-
 /**
- * @param props - 会话注入 face：appendDraft 把识别文本追加进输入框。
+ * 面板本身不接收槽位注入 props：识别文本通过全局 draft writer 写入
+ * “当前会话”的输入框（插件 apply 负责解析当前会话）。
  */
-export const VoiceSidebar = memo(function VoiceSidebar(props: VoiceInjected) {
+export const VoiceSidebar = memo(function VoiceSidebar() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [hidden, setHidden] = useState<boolean>(() => readHidden())
   const [log, setLog] = useState<LogLine[]>(() => [
-    { t: clock(), msg: '就绪：点 🎙️ 录音，结束自动识别并追加到输入框' },
+    { t: clock(), msg: '就绪：先点要填的输入框，再 🎙️ 录音；文字自动填入' },
   ])
   const [toast, setToast] = useState<string | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -117,15 +117,11 @@ export const VoiceSidebar = memo(function VoiceSidebar(props: VoiceInjected) {
         return
       }
       const snippet = text.length > 18 ? `${text.slice(0, 18)}…` : text
-      if (typeof props.appendDraft === 'function') {
-        const err = props.appendDraft(text)
-        if (err === null || err === undefined) {
-          pushLog(`识别 ${text.length} 字：「${snippet}」→ 已追加到输入框`)
-        } else {
-          pushLog(`识别 ${text.length} 字，但填入输入框失败：${err}`, true)
-        }
+      const result = insertRecognizedText(text)
+      if (result.ok) {
+        pushLog(`识别 ${text.length} 字：「${snippet}」→ ${result.message ?? '已填入'}`)
       } else {
-        pushLog(`识别 ${text.length} 字：「${snippet}」（输入框未注入，未填入）`, true)
+        pushLog(`识别 ${text.length} 字，但填入失败：${result.message ?? '未知原因'}`, true)
       }
     } catch (err) {
       pushLog(`识别失败：${err instanceof Error ? err.message : String(err)}`, true)

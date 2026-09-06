@@ -1,28 +1,31 @@
 /**
  * Voice recorder client plugin entry — V1/V2.1 (deepseek-harness dsh 0.1.3-alpha API).
  *
- * 右侧栏（conversation.input.dock）：点击开始录音 → 点击结束，把整段音频
- * 上传到本机 record-sink(:8766) 存成 MP3（结束时刻命名）；
- * V2.1 存完后自动请求 sink /api/stt 做中文识别，识别文本「追加」进当前
- * 会话输入框草稿（appendDraft，换行分隔，不自动发送）。
+ * UI 挂载在 ui-layout 提供的 `shell.overlay`（整壳浮层，root 级、任何对话状态
+ * 包括「思考/回答中」都常驻），因此录音面板不会因会话内部状态被卸载。
  *
- * 填入输入框的权威路径（与 ui-commands 一致）：
+ * 功能：点 🎙️ 开始录音 → 点击结束 → 上传 record-sink(:8766) 存 MP3（结束时刻
+ * 命名）→ 自动 /api/stt 中文识别 → 文本「追加」进当前会话输入框草稿
+ * （不自动发送；多条换行接着排）。
+ *
+ * 写草稿的权威路径（与 ui-commands 一致）：
+ *   sessions.list.getSnapshot().current  → 当前会话 id
  *   sessions.scope(sid) → actx.get('conversation') → conversation.input.for(actx)
- *   → 读 state 当前草稿 → setDraft(旧草稿 + 换行 + 新文本)
- * 任一环节失败都把原因返回给面板日志，绝不静默跳过、绝不自动发送。
+ *   → 读 state 草稿 → setDraft(旧 + 换行 + 新文本)（并校验是否生效）
+ * 任一环节失败都返回中文原因给面板日志，绝不静默、绝不自动发送。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-// Type-only: Session Controller client augment (ctx.sessions binding/scope).
+// Type-only: Session Controller client augment (ctx.sessions binding/scope/list).
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 // Type-only: locale plugin Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: conversation service merge + `conversation.input.dock` slot map.
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: ui-layout slot map merge (shell.overlay)。
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: renderer-owned slots service (ctx.slots).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { VoiceSidebar } from './VoiceSidebar.tsx'
-import type { VoiceInjected } from './contract.ts'
+import { setDraftWriter } from './voice/draft.ts'
 import { en, zh, type VoiceKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -50,39 +53,38 @@ interface DraftInput {
   state?: { getSnapshot?: () => { draft?: string } | undefined }
 }
 
+/** 取当前会话的输入框门面。 */
 function resolveInput(
   ctx: Context,
-  sessionId: SessionId,
 ): { input: DraftInput | undefined; reason?: string } {
   const sessionsAny = ctx.sessions as unknown as {
+    list?: { getSnapshot?: () => { current?: SessionId } | undefined }
     scope?: (id: SessionId) => AnyScope | undefined
-    binding?: (id: SessionId) => { ctx?: AnyScope } | undefined
   }
-  // 权威路径：sessions.scope(id)（ui-commands 同款）。
-  let actx = sessionsAny.scope?.(sessionId)
+  const current = sessionsAny.list?.getSnapshot?.()?.current
+  if (current === undefined) {
+    return { input: undefined, reason: '无当前会话（请先打开一个对话）' }
+  }
+  let actx = sessionsAny.scope?.(current)
   if (actx === undefined) {
-    // 兜底：binding.ctx。
-    const binding = sessionsAny.binding?.(sessionId)
-    actx = binding?.ctx
+    return { input: undefined, reason: '未取到会话作用域' }
   }
-  if (actx === undefined) return { input: undefined, reason: '未取到会话作用域' }
   const conversation = (actx.get?.('conversation') ?? actx.conversation) as
     | { input?: { for?: (scope: unknown) => unknown } }
     | undefined
-  if (conversation === undefined) return { input: undefined, reason: '会话上无 conversation 服务' }
+  if (conversation === undefined) {
+    return { input: undefined, reason: '会话上无 conversation 服务' }
+  }
   const input = conversation.input?.for?.(actx) as DraftInput | undefined
   if (input === undefined) return { input: undefined, reason: '无输入框门面(input.for)' }
   if (typeof input.setDraft !== 'function') return { input: undefined, reason: '输入框无 setDraft' }
   return { input }
 }
 
-/**
- * 识别文本追加进该会话输入框草稿（读当前草稿 → 换行分隔 → setDraft）。
- * 只填不发送。返回 null 成功 / 中文错误说明（供面板日志展示）。
- */
-function appendToDraft(ctx: Context, sessionId: SessionId, text: string): string | null {
-  if (sessionId === undefined || text === '') return '无会话或空文本'
-  const { input, reason } = resolveInput(ctx, sessionId)
+/** 追加进当前会话输入框草稿（换行分隔，不发送），成功 null / 失败中文原因。 */
+function appendToCurrentDraft(ctx: Context, text: string): string | null {
+  if (text === '') return '空文本'
+  const { input, reason } = resolveInput(ctx)
   if (input === undefined) return reason ?? '输入框不可用'
   if (typeof input.setDraft !== 'function') return '输入框无 setDraft'
   try {
@@ -90,6 +92,11 @@ function appendToDraft(ctx: Context, sessionId: SessionId, text: string): string
     const prefix = current === '' ? '' : '\n'
     const next = `${current}${prefix}${text}`
     input.setDraft(next)
+    // 校验写入是否生效（回答进行中等状态若编辑器拒写，这里能暴露）。
+    const after = (input.state?.getSnapshot?.()?.draft as string | undefined) ?? ''
+    if (after !== next && !after.includes(text)) {
+      return `写入未生效（当前草稿 ${after.length} 字，疑似编辑器忙碌中）`
+    }
     console.log(`[ui-voice-call] draft appended: +${text.length} 字（共 ${next.length} 字）`)
     return null
   } catch (err) {
@@ -103,7 +110,7 @@ function appendToDraft(ctx: Context, sessionId: SessionId, text: string): string
  * @param ctx - client root context.
  */
 function applyImpl(ctx: Context): void {
-  console.log('[ui-voice-call] V2.1 loaded (record -> MP3 :8766, ASR -> draft)')
+  console.log('[ui-voice-call] V2.1 loaded (shell.overlay; record -> MP3 :8766, ASR -> draft)')
 
   try {
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-voice-call: dictionaries')
@@ -111,19 +118,16 @@ function applyImpl(ctx: Context): void {
     console.warn('[ui-voice-call] locale register skipped:', err)
   }
 
-  const injectFace = (sessionId: SessionId | undefined): VoiceInjected => ({
-    appendDraft: (text: string) => {
-      if (sessionId === undefined) return '无会话（请在对话页操作）'
-      return appendToDraft(ctx, sessionId, text)
-    },
-  })
+  ctx.effect(() => {
+    setDraftWriter((text: string) => appendToCurrentDraft(ctx, text))
+    return () => setDraftWriter(null)
+  }, 'ui-voice-call: draft writer')
 
-  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock',
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
     id: 'voice-call',
-    order: 80,
+    order: 20,
     locale: NS,
-    inject: injectFace,
   }, VoiceSidebar))
 }
 
