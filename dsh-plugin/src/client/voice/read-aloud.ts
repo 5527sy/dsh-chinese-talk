@@ -57,6 +57,24 @@ class ReadAloud {
 
   constructor() {
     this._enabled = readFlag(READ_KEY, true)
+    // 关页面/离开时停止服务端朗读：服务端是在本机出声，不随浏览器消失而停，
+    // 故页面卸载时主动发 stop（sendBeacon 在 unload 阶段最可靠）。
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('pagehide', () => this.pageCloseStop())
+      window.addEventListener('beforeunload', () => this.pageCloseStop())
+    }
+  }
+
+  /** 页面卸载：尽力通知 record-sink 停当前朗读并清空队列。 */
+  private pageCloseStop(): void {
+    try {
+      const url = `${sinkBase()}/api/speech/stop`
+      if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+        navigator.sendBeacon(url, new Blob([], { type: 'text/plain' }))
+      } else {
+        void fetch(url, { method: 'POST', keepalive: true }).catch(() => { /* ignore */ })
+      }
+    } catch { /* ignore */ }
   }
 
   get reading(): boolean {

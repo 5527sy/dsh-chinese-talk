@@ -489,20 +489,34 @@ def _sanitize_tts_text(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _piper_paths():
-    """开源离线 Piper(内置)：返回 (exe, model, config) 或 None。"""
-    root = Path(__file__).resolve().parent / "piper"
-    exe = root / "bin" / "piper.exe"
-    model = root / "voices" / "zh_CN-huayan-medium.onnx"
-    cfg = root / "voices" / "zh_CN-huayan-medium.onnx.json"
-    if exe.is_file() and model.is_file() and cfg.is_file():
-        return exe, model, cfg
-    return None
+def _edge_exe() -> Optional[Path]:
+    """edge-tts（微软在线晓晓，venv-speech 内安装）可执行文件。"""
+    p = Path(__file__).resolve().parents[1] / "venv-speech" / "Scripts" / "edge-tts.exe"
+    return p if p.is_file() else None
+
+
+def _play_file_wait(path: Path) -> None:
+    global _SPEECH_CURRENT  # noqa: PLW0603
+    play = subprocess.Popen(
+        [str(_resolve_ffplay()), "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    with _SPEECH_STATE_LOCK:
+        _SPEECH_CURRENT = play
+    try:
+        play.wait(timeout=900)
+    finally:
+        with _SPEECH_STATE_LOCK:
+            if _SPEECH_CURRENT is play:
+                _SPEECH_CURRENT = None
 
 
 def _speak_sapi_piece(text: str) -> None:
-    """系统 SAPI 兜底（默认语音）。"""
+    """本机 SAPI 离线兜底（speak.ps1，System.Speech，优先 Huihui 中文）。"""
     engine = Path(__file__).resolve().parent / "speak.ps1"
+    if not engine.is_file():
+        raise RuntimeError(f"speak.ps1 不存在: {engine}")
     proc = subprocess.Popen(
         [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -519,51 +533,41 @@ def _speak_sapi_piece(text: str) -> None:
         with _SPEECH_STATE_LOCK:
             if _SPEECH_CURRENT is proc:
                 _SPEECH_CURRENT = None
+    if proc.returncode != 0:
+        raise RuntimeError(f"SAPI 朗读失败 rc={proc.returncode}")
 
 
-def _speak_piper_piece(exe: Path, model: Path, cfg: Path, text: str) -> None:
-    """Piper(huayan) 合成一段 -> 临时 wav -> ffplay 播放。"""
-    fd, path = _tempfile.mkstemp(suffix=".wav", prefix="dsh_piper_")
-    os.close(fd)
-    try:
-        synth = subprocess.Popen(
-            [str(exe), "-m", str(model), "-c", str(cfg), "--output_file", str(path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        with _SPEECH_STATE_LOCK:
-            _SPEECH_CURRENT = synth
+def _speak_edge_piece(text: str) -> None:
+    """edge-tts(晓晓在线) 合成一段 mp3 -> ffplay 播放；失败自动重试，最终抛错。"""
+    exe = _edge_exe()
+    if exe is None:
+        raise RuntimeError("edge-tts 不可用（venv-speech 内未找到 edge-tts.exe）")
+    last = "unknown"
+    for attempt in range(1, 4):  # NoAudioReceived/节流：自动重试 3 次
+        if _SPEECH_STOP.is_set():
+            return
+        fd, path = _tempfile.mkstemp(suffix=".mp3", prefix="dsh_edge_")
+        os.close(fd)
         try:
-            assert synth.stdin is not None
-            synth.stdin.write(text.encode("utf-8"))
-            synth.stdin.close()
-            synth.wait(timeout=900)
-        finally:
-            with _SPEECH_STATE_LOCK:
-                if _SPEECH_CURRENT is synth:
-                    _SPEECH_CURRENT = None
-        if synth.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 1000:
-            play = subprocess.Popen(
-                [str(_resolve_ffplay()), "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            _r = subprocess.run(
+                [str(exe), "--voice", "zh-CN-XiaoxiaoNeural", "--text", text, "--write-media", path],
+                capture_output=True,
+                timeout=120,
             )
-            with _SPEECH_STATE_LOCK:
-                _SPEECH_CURRENT = play
-            try:
-                play.wait(timeout=900)
-            finally:
-                with _SPEECH_STATE_LOCK:
-                    if _SPEECH_CURRENT is play:
-                        _SPEECH_CURRENT = None
-        else:
-            raise RuntimeError(f"piper 合成失败 rc={synth.returncode}")
-    finally:
-        try:
-            os.unlink(path)
-        except Exception:  # noqa: BLE001
-            pass
+            if _r.returncode != 0 or not Path(path).exists() or Path(path).stat().st_size < 2000:
+                last = _r.stderr.decode("utf-8", "replace").strip()[-1200:]
+                continue  # 重试
+            _play_file_wait(Path(path))
+            return
+        finally:
+            if Path(path).exists():
+                try:
+                    os.unlink(path)
+                except Exception:  # noqa: BLE001
+                    pass
+        if attempt < 3:
+            time.sleep(1.2 * attempt)
+    raise RuntimeError(f"edge-tts 合成失败（3 次重试）: {last}")
 
 
 def _speech_worker() -> None:
@@ -576,14 +580,16 @@ def _speech_worker() -> None:
             _SPEECH_STATE["speaking"] = True
             _SPEECH_STATE["queue"] = max(0, _SPEECH_QUEUE.qsize())
         try:
-            piper = _piper_paths()
             for piece in _split_speech(text, max_len=280, min_pause=50):
                 if _SPEECH_STOP.is_set():
                     break
-                if piper is not None:
-                    _speak_piper_piece(*piper, text=piece)
-                else:
-                    _speak_sapi_piece(piece)
+                try:
+                    _speak_edge_piece(piece)  # 在线晓晓（重试）
+                except Exception as edge_err:  # noqa: BLE001
+                    print(f"[record-sink] edge 失败，回退本机离线语音: {edge_err}", flush=True)
+                    if _SPEECH_STOP.is_set():
+                        break
+                    _speak_sapi_piece(piece)   # 本机 Huihui 离线兜底
         except Exception as err:  # noqa: BLE001
             print(f"[record-sink] speak error: {err}", flush=True)
             with _SPEECH_STATE_LOCK:
@@ -611,7 +617,7 @@ def _ensure_speech_worker() -> None:
 
 @app.post("/api/speak")
 async def speak(request: Request) -> JSONResponse:
-    """整段文本入队朗读（克隆音色，服务端 ffplay 出声，串行）。"""
+    """整段文本入队朗读（仅 edge-tts 晓晓在线，服务端合成+ffplay 出声，串行）。"""
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001
