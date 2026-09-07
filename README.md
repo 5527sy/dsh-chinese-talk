@@ -103,11 +103,28 @@ Older versions used `scripts/register_plugin.py` to copy `packages/client/ui-voi
 
 The browser plugin talks to `http://127.0.0.1:8766` by default. The bridge is a separate local Python process because microphone conversion, FunASR, local file output, and audio playback all run outside the browser.
 
+### Windows one-click start (recommended)
+
+Double-click `一键启动.cmd` in the repository root. On first run it creates `.venv`, installs `bridge/requirements.txt`, installs CPU `torch`/`torchaudio` when PyTorch is missing (required by FunASR STT), and starts `python -m bridge.record_sink`.
+
+Or run it manually:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-bridge.ps1
+```
+
+For CUDA PyTorch, install the matching wheels yourself, or run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-bridge.ps1 -TorchIndexUrl https://download.pytorch.org/whl/cu126
+```
+
 Windows PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r .\bridge\requirements.txt
+.\.venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 .\bridge\start.ps1
 ```
 

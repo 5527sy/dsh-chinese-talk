@@ -103,11 +103,28 @@ dsh plugin --profile web remove dsh-chinese-talk
 
 浏览器插件默认连接 `http://127.0.0.1:8766`。录音转码、FunASR、文件保存和本机播放都在浏览器之外，需要一个独立的本地 Python 进程。
 
+### Windows 一键启动（推荐）
+
+双击仓库根目录的 `一键启动.cmd`。首次运行会自动创建 `.venv`、安装 `bridge/requirements.txt`，并在缺少 PyTorch 时补装 CPU 版 `torch`/`torchaudio`（FunASR STT 需要），然后启动 `python -m bridge.record_sink`。
+
+也可以手动执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-bridge.ps1
+```
+
+需要 CUDA 版 PyTorch 时，可先自行安装对应 wheel，或运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-bridge.ps1 -TorchIndexUrl https://download.pytorch.org/whl/cu126
+```
+
 Windows PowerShell：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r .\bridge\requirements.txt
+.\.venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 .\bridge\start.ps1
 ```
 
